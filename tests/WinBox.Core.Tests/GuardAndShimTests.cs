@@ -66,6 +66,26 @@ public sealed class HostReferenceRulesTests
         Assert.AreEqual(HostReferenceKind.Trace, HostReferenceRules.ClassifyKey(key));
 
     [TestMethod]
+    [DataRow(@"Software\Microsoft\DirectX\UserGpuPreferences")]
+    [DataRow(@"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers")]
+    public void SettingsThatCannotStartAnythingAreTraces(string key) =>
+        Assert.AreEqual(HostReferenceKind.Trace, HostReferenceRules.ClassifyKey(key));
+
+    [TestMethod]
+    public void ListsLoseOnlyTheEntriesInTheBox()
+    {
+        Assert.IsTrue(HostReferenceRules.HoldsLists("Environment"));
+        Assert.IsFalse(HostReferenceRules.HoldsLists(@"Software\Microsoft\Windows\CurrentVersion\Run"));
+
+        var path = @"%USERPROFILE%\bin;C:\WinBox\Data\Boxes\1.box\App\bin;C:\Python312".Split(';');
+        CollectionAssert.AreEqual(new[] { @"%USERPROFILE%\bin", @"C:\Python312" }, HostReferenceRules.WithoutMentions(path, Boxes)!.ToList());
+    }
+
+    [TestMethod]
+    public void ListOfOnlyBoxEntriesGoesEntirely() =>
+        Assert.IsNull(HostReferenceRules.WithoutMentions(@"C:\WinBox\Data\Boxes\1.box\App;".Split(';'), Boxes));
+
+    [TestMethod]
     public void PackageRegistrationsAreNotScanned()
     {
         Assert.IsTrue(HostReferenceRules.IsIgnoredKey(@"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages\WinBox.Box.1_1.0.0.0_x64__x"));

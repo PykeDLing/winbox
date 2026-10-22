@@ -195,6 +195,9 @@ public sealed class LibraryService : IDisposable
         var package = await _host.Packages.RegisterAsync(box);
         var updated = box with { Config = box.Config with { Package = package } };
         _host.Store.Save(updated);
+        // Removal unregisters whatever package the library holds, so it must see this one.
+        lock (_lock)
+            _boxes = [.. _boxes.Select(b => b.Config.Id == updated.Config.Id ? updated : b)];
         return updated;
     }
 
@@ -228,7 +231,7 @@ public sealed class LibraryService : IDisposable
                 if (r.State == BoxRunState.Running)
                     SetActivity(id, current => current == BoxActivity.Starting ? BoxActivity.Running : current);
                 else if (r.State == BoxRunState.Closing)
-                    SetActivity(id, _ => BoxActivity.Closing);
+                    SetActivity(id, current => current == BoxActivity.Removing ? current : BoxActivity.Closing);
             });
             problem = Texts.RunProblem(record);
         }
@@ -239,7 +242,9 @@ public sealed class LibraryService : IDisposable
         lock (_lock)
         {
             _ownRuns.Remove(id);
-            _activity[id] = BoxActivity.Idle;
+            // A removal that stopped this run owns the box's state until it is done.
+            if (_activity.GetValueOrDefault(id) != BoxActivity.Removing)
+                _activity[id] = BoxActivity.Idle;
             if (problem is not null)
                 _problems[id] = problem;
         }
@@ -278,12 +283,15 @@ public sealed class LibraryService : IDisposable
                     while (PackagedBoxRunner.IsRunning(box) && DateTimeOffset.Now < deadline)
                         await Task.Delay(500);
                 }
+                // Unregistering or deleting under a live sandbox would pull the app's files out from under it.
+                if (PackagedBoxRunner.IsRunning(box))
+                    throw new InvalidOperationException(Texts.StillRunning);
                 if (box.Config.Package is { } package)
                     await _host.Packages.UnregisterAsync(package);
                 _host.Store.Delete(box);
                 var references = _host.Guard.Scan(box.Paths.Root);
                 if (references.Count > 0)
-                    _host.Guard.Remove(references, GuardBackup($"remove-{id:N}"));
+                    _host.Guard.Remove(references, box.Paths.Root, GuardBackup($"remove-{id:N}"));
             });
             lock (_lock)
             {
@@ -294,6 +302,7 @@ public sealed class LibraryService : IDisposable
         }
         catch (Exception e)
         {
+            AppLog.Write($"removing {id:N} failed: {e}");
             lock (_lock)
             {
                 _activity[id] = BoxActivity.Idle;
@@ -306,10 +315,10 @@ public sealed class LibraryService : IDisposable
 
     public async Task<GuardCleanup> FixLeaksAsync()
     {
-        IReadOnlyList<HostReference> leaks;
-        lock (_lock)
-            leaks = _leaks;
-        var cleanup = await Task.Run(() => _host.Guard.Remove(leaks, GuardBackup("fix")));
+        // Scanned again rather than taken from the banner, which may be hours old.
+        var root = _host.Paths.Boxes;
+        var cleanup = await Task.Run(() => _host.Guard.Remove(
+            _host.Guard.Scan(root).Where(r => r.Kind == HostReferenceKind.Leak).ToList(), root, GuardBackup("fix")));
         await ScanHostAsync();
         return cleanup;
     }

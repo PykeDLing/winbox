@@ -43,6 +43,9 @@ public interface IHostGuard
     /// <summary>Everything in the user's registry, shortcuts and scheduled tasks that points inside <paramref name="root"/>.</summary>
     IReadOnlyList<HostReference> Scan(string root);
 
-    /// <summary>Removes the references, first saving what each one was into <paramref name="backupDirectory"/>.</summary>
-    GuardCleanup Remove(IReadOnlyCollection<HostReference> references, string backupDirectory);
+    /// <summary>
+    /// Removes the references that still point inside <paramref name="root"/>, first saving what each one was
+    /// into <paramref name="backupDirectory"/>. A reference that changed since it was scanned is left alone.
+    /// </summary>
+    GuardCleanup Remove(IReadOnlyCollection<HostReference> references, string root, string backupDirectory);
 }

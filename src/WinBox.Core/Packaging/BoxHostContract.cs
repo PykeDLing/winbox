@@ -13,7 +13,10 @@ public static class BoxHostContract
     public const string RunFile = "run.json";
     public const string LogFile = "boxhost.log";
 
-    /// <summary>Named event WinBox sets to make BoxHost force-kill the sandboxed app.</summary>
+    /// <summary>
+    /// Named event WinBox sets to make BoxHost force-kill the sandboxed app. BoxHost holds it from before it
+    /// reports Starting until it exits, so it also tells whether BoxHost is alive.
+    /// </summary>
     public static string StopEventName(Guid boxId) => $@"Local\WinBox.Box.{boxId:N}.Stop";
 
     public static string LaunchPath(BoxPaths box) => Path.Combine(box.Host, LaunchFile);

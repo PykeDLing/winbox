@@ -74,8 +74,13 @@ public sealed class PackagedBoxRunner(IBoxPackageManager packages, BoxShimDeploy
     /// Whether the box's sandbox is up right now (including while it closes), whoever started it: this
     /// WinBox, another one, or the CLI.
     /// </summary>
+    /// <remarks>
+    /// Liveness comes from BoxHost's stop event, not from the process id in run.json: a BoxHost killed at
+    /// shutdown never writes Exited, and after a reboot its old id may belong to any process, including
+    /// ones this user cannot even query.
+    /// </remarks>
     public static bool IsRunning(LoadedBox box) =>
-        ReadRun(box) is { State: BoxRunState.Starting or BoxRunState.Running or BoxRunState.Closing } run && IsAlive(run.HostProcessId);
+        ReadRun(box) is { State: BoxRunState.Starting or BoxRunState.Running or BoxRunState.Closing } && HostIsAlive(box.Config.Id);
 
     public static BoxRunRecord? ReadRun(LoadedBox box)
     {
@@ -90,16 +95,18 @@ public sealed class PackagedBoxRunner(IBoxPackageManager packages, BoxShimDeploy
         }
     }
 
-    private static bool IsAlive(uint pid)
+    private static bool HostIsAlive(Guid boxId)
     {
         try
         {
-            using var p = Process.GetProcessById((int)pid);
-            return !p.HasExited;
+            if (!EventWaitHandle.TryOpenExisting(BoxHostContract.StopEventName(boxId), out var stop))
+                return false;
+            stop.Dispose();
+            return true;
         }
-        catch (ArgumentException)
+        catch (UnauthorizedAccessException)
         {
-            return false;
+            return true; // It exists; only BoxHost creates it.
         }
     }
 }

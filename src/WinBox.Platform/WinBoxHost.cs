@@ -24,7 +24,8 @@ public sealed class WinBoxHost : IDisposable
         Sandbox = new MxcSandboxRunner();
         Planner = new LaunchPlanner(
             LaunchPlanner.DefaultPersonalFolders(),
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            [AppContext.BaseDirectory, Paths.Root]);
         Packages = new MsixBoxPackageManager(MsixBoxPackageManager.DefaultPayloadDirectory);
         Shim = new BoxShimDeployer(BoxShimDeployer.DefaultPayloadDirectory);
         PackagedRunner = new PackagedBoxRunner(Packages, Shim);

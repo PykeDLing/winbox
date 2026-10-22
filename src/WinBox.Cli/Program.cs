@@ -258,7 +258,7 @@ async Task<int> Remove(string key)
     var references = host.Guard.Scan(box.Paths.Root);
     if (references.Count > 0)
     {
-        var cleanup = host.Guard.Remove(references, GuardBackupDirectory($"remove-{box.Config.Id:N}"));
+        var cleanup = host.Guard.Remove(references, box.Paths.Root, GuardBackupDirectory($"remove-{box.Config.Id:N}"));
         Console.WriteLine($"host references removed: {cleanup.Removed} (backup: {cleanup.BackupDirectory})");
         foreach (var failure in cleanup.Failures)
             Console.Error.WriteLine($"  could not remove {failure}");
@@ -279,7 +279,7 @@ int Guard(bool fix)
 
     if (leaks.Count == 0)
         return 0;
-    var cleanup = host.Guard.Remove(leaks, GuardBackupDirectory("fix"));
+    var cleanup = host.Guard.Remove(leaks, host.Paths.Boxes, GuardBackupDirectory("fix"));
     Console.WriteLine($"removed {cleanup.Removed} (backup: {cleanup.BackupDirectory})");
     foreach (var failure in cleanup.Failures)
         Console.Error.WriteLine($"  could not remove {failure}");

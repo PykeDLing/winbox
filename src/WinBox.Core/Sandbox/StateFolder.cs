@@ -59,13 +59,29 @@ public sealed class StateFolder(string root)
 
     /// <summary>
     /// Saves <paramref name="source"/> as the new state. Files that cannot be read (still locked by a
-    /// process that outlived the app) keep their previously saved version.
+    /// process that outlived the app) keep their previously saved version, and so do the files
+    /// <paramref name="notRestored"/> lists: the last restore could not bring them in, so the app never saw
+    /// them. Failing to write the new copy (a full disk) throws and leaves the last good copy in place.
     /// </summary>
-    public CopyStats Save(string source, IReadOnlyCollection<string> excluded)
+    public CopyStats Save(string source, IReadOnlyCollection<string> excluded, IReadOnlyCollection<string>? notRestored = null)
     {
         var previous = Recover();
         Directory.CreateDirectory(root);
         var stats = CopyTree(source, Next, excluded, fallback: previous);
+        if (previous is not null)
+        {
+            foreach (var relative in notRestored ?? [])
+            {
+                var target = Path.Combine(Next, relative);
+                if (File.Exists(target) || File.Exists(Path.Combine(source, relative)))
+                    continue;
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                if (TryCopyFile(Path.Combine(previous, relative), target))
+                    stats.KeptPrevious.Add(relative);
+                else
+                    stats.Skipped.Add(relative);
+            }
+        }
         using (File.Create(NextComplete, 0, FileOptions.WriteThrough)) { }
         SwapInNext();
         File.Delete(NextComplete);
@@ -85,7 +101,11 @@ public sealed class StateFolder(string root)
         Directory.Move(Next, Current);
     }
 
-    private static CopyStats CopyTree(string source, string destination, IReadOnlyCollection<string> excluded, string? fallback)
+    /// <summary>Opens a file of the copy being written. Tests replace it to simulate a full disk.</summary>
+    internal Func<string, Stream> OpenDestination { get; init; } =
+        path => new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
+
+    private CopyStats CopyTree(string source, string destination, IReadOnlyCollection<string> excluded, string? fallback)
     {
         var stats = new CopyStats();
         Directory.CreateDirectory(destination);
@@ -128,26 +148,55 @@ public sealed class StateFolder(string root)
         return stats;
     }
 
-    private static bool TryCopyFile(string from, string to)
+    /// <summary>
+    /// Copies one file. Returns false only when the source cannot be opened or read (still locked by a
+    /// process that outlived the app); a copy that fails halfway is removed rather than kept truncated.
+    /// Anything failing on the destination side throws, so the copy is never marked complete.
+    /// </summary>
+    private bool TryCopyFile(string from, string to)
     {
+        FileStream input;
         try
         {
             if (!File.Exists(from))
                 return false;
-            using (var input = new FileStream(from, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-            using (var output = new FileStream(to, FileMode.Create, FileAccess.Write, FileShare.None))
-            {
-                input.CopyTo(output);
-                // The swap is a rename; without this a power cut right after it could keep the rename but
-                // lose the data still sitting in the cache.
-                output.Flush(flushToDisk: true);
-            }
-            File.SetLastWriteTimeUtc(to, File.GetLastWriteTimeUtc(from));
-            return true;
+            input = new FileStream(from, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
             return false;
+        }
+
+        using (input)
+        {
+            var modified = File.GetLastWriteTimeUtc(input.SafeFileHandle);
+            using (var output = OpenDestination(to))
+            {
+                var buffer = new byte[81920];
+                while (true)
+                {
+                    int read;
+                    try
+                    {
+                        read = input.Read(buffer);
+                    }
+                    catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                    {
+                        output.Dispose();
+                        File.Delete(to);
+                        return false;
+                    }
+                    if (read == 0)
+                        break;
+                    output.Write(buffer, 0, read);
+                }
+                // The swap is a rename; without this a power cut right after it could keep the rename but
+                // lose the data still sitting in the cache.
+                if (output is FileStream file)
+                    file.Flush(flushToDisk: true);
+            }
+            File.SetLastWriteTimeUtc(to, modified);
+            return true;
         }
     }
 }

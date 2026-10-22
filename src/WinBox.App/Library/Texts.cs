@@ -74,6 +74,8 @@ public static class Texts
 
     public static string RemoveFailed(Exception e) => $"删除没有完成：{e.Message}";
 
+    public const string StillRunning = "它在 30 秒内没有退出，请先强制退出再删除。";
+
     /// <summary>Tells same-named boxes apart (two imports of one installer look identical otherwise).</summary>
     public static string Added(DateTimeOffset createdAt) => $"添加于 {createdAt.ToLocalTime():M月d日 HH:mm}";
 

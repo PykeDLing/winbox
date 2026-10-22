@@ -37,6 +37,9 @@ public static class HostReferenceRules
         @"Software\Microsoft\Windows\CurrentVersion\Search\JumplistData",
         @"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant",
         @"Control Panel\NotifyIconSettings",
+        // Per-program settings the user made (GPU choice, compatibility mode); they cannot start anything.
+        @"Software\Microsoft\DirectX\UserGpuPreferences",
+        @"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers",
     ];
 
     /// <summary>Top-level keys the guard walks.</summary>
@@ -53,6 +56,22 @@ public static class HostReferenceRules
     /// </summary>
     public static bool RemovesWholeKey(string key) =>
         IsUnder(key, @"Control Panel\NotifyIconSettings") && key.Count(c => c == '\\') == 2;
+
+    /// <summary>
+    /// Whether the values in <paramref name="key"/> are ';'-separated lists (environment variables such as
+    /// PATH): one entry pointing into a box must not cost the user the whole list.
+    /// </summary>
+    public static bool HoldsLists(string key) => IsUnder(key, "Environment");
+
+    /// <summary>
+    /// The entries of a list value that do not mention <paramref name="root"/>, or null when none are left
+    /// and the value should go entirely.
+    /// </summary>
+    public static IReadOnlyList<string>? WithoutMentions(IReadOnlyList<string> entries, string root)
+    {
+        var kept = entries.Where(e => !Mentions(e, root)).ToList();
+        return kept.Any(e => e.Trim().Length > 0) ? kept : null;
+    }
 
     /// <summary>Whether <paramref name="text"/> names <paramref name="root"/> or anything inside it.</summary>
     public static bool Mentions(string text, string root)
