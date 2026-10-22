@@ -1,4 +1,7 @@
 <Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
   <!-- Pinned versions. The Reactor template defaults to "*"; pinning keeps builds reproducible. -->
   <ItemGroup>
     <PackageVersion Include="Microsoft.UI.Reactor" Version="0.1.0-preview.16" />
@@ -6,6 +9,5 @@
     <PackageVersion Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
     <PackageVersion Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <PackageVersion Include="Microsoft.Mxc.Sdk" Version="1.0.1" />
-    <PackageVersion Include="MSTest" Version="4.5.1" />
   </ItemGroup>
 </Project>
