@@ -9,8 +9,6 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>$(WinBoxWindowsTfm)</TargetFramework>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <SelfContained>false</SelfContained>
-    <AssemblyName>WinBox.BoxHost</AssemblyName>
     <OutDir>$(MSBuildThisFileDirectory)..\..\artifacts\boxhost\$(Configuration)\</OutDir>
   </PropertyGroup>
 

@@ -31,9 +31,11 @@ WinBox 是 [MacBox](https://github.com/PykeDLing/macbox) 的 Windows 版。
 
 ## 构建和运行
 
+在仓库根目录：
+
 ```powershell
-dotnet build WinBox.slnx
-dotnet test --project tests\WinBox.Core.Tests\WinBox.Core.Tests.csproj
+dotnet build
+dotnet test
 ```
 
 开发时数据放在仓库下的 `.data\`（相当于安装目录里的 `Data\`）。

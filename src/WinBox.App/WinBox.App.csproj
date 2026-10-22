@@ -5,12 +5,9 @@
     <!-- MXC ProcessContainer needs Windows 11 25H2 (26200.9278+); that is checked at runtime. -->
     <TargetPlatformMinVersion>10.0.26100.0</TargetPlatformMinVersion>
     <SupportedOSPlatformVersion>10.0.26100.0</SupportedOSPlatformVersion>
-    <RootNamespace>WinBox.App</RootNamespace>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationIcon Condition="Exists('Assets\AppIcon.ico')">Assets\AppIcon.ico</ApplicationIcon>
-    <Platforms>x64</Platforms>
-    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant())</RuntimeIdentifier>
-    <PublishProfile Condition="Exists('Properties\PublishProfiles\win-$(Platform).pubxml')">win-$(Platform).pubxml</PublishProfile>
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
     <UseWinUI>true</UseWinUI>
     <WinUISDKReferences>false</WinUISDKReferences>
     <!--
@@ -22,45 +19,29 @@
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(Configuration)' != 'Debug'">
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <PublishTrimmed>true</PublishTrimmed>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\WinBox.Core\WinBox.Core.csproj" />
     <ProjectReference Include="..\WinBox.Platform\WinBox.Platform.csproj" />
-  </ItemGroup>
-
-  <Import Project="..\..\build\BoxHostPayload.targets" />
-
-  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" />
+    <PackageReference Include="Microsoft.UI.Reactor" />
     <!-- The title bar and window look for Assets\AppIcon.ico next to the exe. -->
     <Content Include="Assets\AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Manifest Include="$(ApplicationManifest)" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" />
-    <PackageReference Include="Microsoft.WindowsAppSDK" />
-    <PackageReference Include="Microsoft.UI.Reactor" />
-  </ItemGroup>
-
   <!--
-    Debug-only: enable the Reactor devtools surface so the devtools F5 profile
-    (in Properties/launchSettings.json) lights up the devtools menu. Release /
-    Publish builds drop the package and the host-config switch so the trim / AOT
-    analyzers stay happy. To enable devtools in Release too, move these into the
-    unconditioned ItemGroup above.
+    Debug only: the Reactor devtools behind the "Devtools" profile in Properties/launchSettings.json.
+    Release builds leave them out so the trim and AOT analyzers stay quiet.
   -->
   <ItemGroup Condition="'$(Configuration)' == 'Debug'">
     <PackageReference Include="Microsoft.UI.Reactor.Devtools" />
     <RuntimeHostConfigurationOption Include="Reactor.DevtoolsSupport" Value="true" Trim="true" />
   </ItemGroup>
 
-  <!-- Publish Properties -->
-  <PropertyGroup>
-    <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
-    <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
-    <PublishTrimmed Condition="'$(Configuration)' == 'Debug'">False</PublishTrimmed>
-    <PublishTrimmed Condition="'$(Configuration)' != 'Debug'">True</PublishTrimmed>
-  </PropertyGroup>
+  <Import Project="..\..\build\BoxHostPayload.targets" />
 </Project>
