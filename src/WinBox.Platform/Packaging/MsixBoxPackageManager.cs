@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.Marshalling;
 using System.Text;
 using Microsoft.Win32;
+using Windows.Foundation;
 using Windows.Management.Deployment;
 using WinBox.Core.Boxes;
 using WinBox.Core.Packaging;
@@ -59,13 +60,33 @@ public sealed partial class MsixBoxPackageManager(string boxHostPayload) : IBoxP
     {
         foreach (var installed in _packages.FindPackagesForUser(string.Empty, package.FamilyName).ToList())
         {
-            var result = await _packages.RemovePackageAsync(installed.Id.FullName).AsTask(cancellationToken).ConfigureAwait(false);
+            var fullName = installed.Id.FullName;
+            var removal = _packages.RemovePackageAsync(fullName);
+            // Polled, not awaited: when the package's app ran from this process moments before, the removal's
+            // completion callback has been seen never to arrive although Windows finished the removal, which
+            // left the caller waiting forever. Whichever comes first counts: the operation's status, or the
+            // package being gone.
+            var deadline = DateTimeOffset.Now + RemovalTimeout;
+            while (removal.Status == AsyncStatus.Started && IsInstalled(package, fullName))
+            {
+                if (DateTimeOffset.Now > deadline)
+                    throw new TimeoutException($"Removing {fullName} did not finish within {RemovalTimeout.TotalSeconds:0}s.");
+                await Task.Delay(250, cancellationToken).ConfigureAwait(false);
+            }
+            if (removal.Status == AsyncStatus.Started)
+                continue; // Gone from the catalog; the operation never reported back.
+            var result = removal.GetResults();
             if (result.ExtendedErrorCode is { } error && error.HResult != 0)
-                throw new InvalidOperationException($"Removing {installed.Id.FullName} failed (0x{error.HResult:X8}): {result.ErrorText}", error);
+                throw new InvalidOperationException($"Removing {fullName} failed (0x{error.HResult:X8}): {result.ErrorText}", error);
         }
         // Windows leaves the package's (empty) policy cache key behind after removing it.
         Registry.CurrentUser.DeleteSubKeyTree($@"{PolicyCacheKey}\{package.FamilyName}", throwOnMissingSubKey: false);
     }
+
+    private static readonly TimeSpan RemovalTimeout = TimeSpan.FromMinutes(2);
+
+    private bool IsInstalled(BoxPackage package, string fullName) =>
+        _packages.FindPackagesForUser(string.Empty, package.FamilyName).Any(p => p.Id.FullName == fullName);
 
     private const string PolicyCacheKey = @"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\PolicyCache";
 

@@ -46,6 +46,45 @@ public sealed class LaunchPlannerTests
     }
 
     [TestMethod]
+    public void RestOfWinBoxIsDeniedWhenAGrantedFolderHoldsIt()
+    {
+        using var t = new TestBox();
+        var box = t.Create(TestBox.Config());
+        var other = t.Create(TestBox.Config());
+        t.Paths.EnsureCreated();
+        var install = Directory.CreateDirectory(Path.Combine(t.Root, "..", Path.GetFileName(t.Root) + "-install")).FullName;
+        try
+        {
+            // The data root and the install directory both sit in a granted personal folder, as in development.
+            var personal = Path.GetDirectoryName(t.Root)!;
+            var spec = new LaunchPlanner([personal], LocalAppData, [install, t.Root]).Plan(box, DateTimeOffset.Now);
+            var denied = spec.DeniedPaths.ToList();
+
+            foreach (var item in new[] { other.Paths.Root, t.Paths.Downloads, t.Paths.Logs, install, box.Paths.ConfigFile })
+                CollectionAssert.Contains(denied, item);
+            // Nothing that holds the box's own grants may be denied: that would take the grants back.
+            foreach (var item in new[] { t.Root, t.Paths.Boxes, box.Paths.Root, box.Paths.App, box.Paths.Data, box.Paths.State })
+                CollectionAssert.DoesNotContain(denied, item);
+        }
+        finally
+        {
+            Directory.Delete(install, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public void WinBoxOutsideGrantedFoldersNeedsNoExtraDenials()
+    {
+        using var t = new TestBox();
+        var box = t.Create(TestBox.Config());
+        t.Create(TestBox.Config());
+
+        var spec = new LaunchPlanner(Personal, LocalAppData, [t.Root]).Plan(box, DateTimeOffset.Now);
+
+        CollectionAssert.AreEquivalent(box.Paths.PrivateItems.ToList(), spec.DeniedPaths.ToList());
+    }
+
+    [TestMethod]
     public void DataPlaceholderIsExpanded()
     {
         using var t = new TestBox();

@@ -15,12 +15,16 @@ var state = new StateFolder(options.StateDirectory);
 var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 var saveLock = new Lock();
 var saved = false;
+CopyStats? restored = null;
 
 try
 {
     var clock = Stopwatch.StartNew();
-    var restored = state.RestoreTo(localAppData);
+    // Failing to write into the sandbox (a full disk) throws here: the app does not start on partial state.
+    restored = state.RestoreTo(localAppData);
     log.Write($"restored into {localAppData}: {(restored is null ? "nothing saved yet" : restored)} ({clock.ElapsedMilliseconds} ms)");
+    foreach (var file in restored?.Skipped.Take(20) ?? [])
+        log.Write($"  not restored (kept for the next save): {file}");
 
     using var app = AppProcess.Start(options.Executable, options.Arguments);
     log.Write($"started {options.Executable} pid {app.ProcessId}; {(app.Tracked ? "tracking its process tree in a job" : "job unavailable, tracking by image path")}");
@@ -56,7 +60,7 @@ void Save(string reason)
         var clock = Stopwatch.StartNew();
         try
         {
-            var stats = state.Save(localAppData, options.Exclusions);
+            var stats = state.Save(localAppData, options.Exclusions, restored?.Skipped);
             log.Write($"saved ({reason}): {stats} ({clock.ElapsedMilliseconds} ms)");
             foreach (var file in stats.KeptPrevious.Concat(stats.Skipped).Take(20))
                 log.Write($"  unreadable: {file}");

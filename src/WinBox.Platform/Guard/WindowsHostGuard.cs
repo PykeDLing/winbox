@@ -23,41 +23,29 @@ public sealed class WindowsHostGuard : IHostGuard
         return found;
     }
 
-    public GuardCleanup Remove(IReadOnlyCollection<HostReference> references, string backupDirectory)
+    public GuardCleanup Remove(IReadOnlyCollection<HostReference> references, string root, string backupDirectory)
     {
         Directory.CreateDirectory(backupDirectory);
         var removed = 0;
         var failures = new List<string>();
         var exported = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // Each reference is checked again right before it goes: the scan may be old, and the program may have
+        // been installed natively since, reusing the same value names, shortcuts or tasks.
         foreach (var reference in references)
         {
             try
             {
-                switch (reference.Location)
+                var done = reference.Location switch
                 {
-                    case HostLocationKind.RegistryValue:
-                        var key = reference.Path[@"HKCU\".Length..];
-                        if (exported.Add(key))
-                            ExportKey(reference.Path, Path.Combine(backupDirectory, $"reg-{exported.Count:D3}.reg"));
-                        if (HostReferenceRules.RemovesWholeKey(key))
-                            Registry.CurrentUser.DeleteSubKeyTree(key, throwOnMissingSubKey: false);
-                        else
-                        {
-                            using var writable = Registry.CurrentUser.OpenSubKey(key, writable: true);
-                            writable?.DeleteValue(reference.Name ?? "", throwOnMissingValue: false);
-                        }
-                        break;
-                    case HostLocationKind.File:
-                        var copy = Path.Combine(backupDirectory, "files", $"{removed:D3}-{Path.GetFileName(reference.Path)}");
-                        Directory.CreateDirectory(Path.GetDirectoryName(copy)!);
-                        File.Move(reference.Path, copy);
-                        break;
-                    case HostLocationKind.ScheduledTask:
-                        DeleteTask(reference.Path, Path.Combine(backupDirectory, $"task-{removed:D3}.xml"));
-                        break;
-                }
-                removed++;
+                    HostLocationKind.RegistryValue => RemoveValue(reference, root, backupDirectory, exported),
+                    HostLocationKind.File => RemoveFile(reference.Path, root,
+                        Path.Combine(backupDirectory, "files", $"{removed:D3}-{Path.GetFileName(reference.Path)}")),
+                    HostLocationKind.ScheduledTask => DeleteTask(reference.Path, root, Path.Combine(backupDirectory, $"task-{removed:D3}.xml")),
+                    _ => false,
+                };
+                if (done)
+                    removed++;
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException or SecurityException or COMException or ArgumentException)
             {
@@ -65,6 +53,61 @@ public sealed class WindowsHostGuard : IHostGuard
             }
         }
         return new GuardCleanup(removed, failures, backupDirectory);
+    }
+
+    /// <summary>
+    /// Removes a registry reference that still points inside <paramref name="root"/>. List values (REG_MULTI_SZ,
+    /// environment variables) lose only their matching entries and keep their kind.
+    /// </summary>
+    private static bool RemoveValue(HostReference reference, string root, string backupDirectory, HashSet<string> exported)
+    {
+        var key = reference.Path[@"HKCU\".Length..];
+        var name = reference.Name ?? "";
+        using var writable = Registry.CurrentUser.OpenSubKey(key, writable: true);
+        if (writable is null)
+            return false;
+        var wholeKey = HostReferenceRules.RemovesWholeKey(key);
+        if (wholeKey ? !writable.GetValueNames().Any(n => PointsInto(writable, n, root)) : !PointsInto(writable, name, root))
+            return false;
+
+        // Nothing goes without a backup of its key. A failed export throws, and the key's next value tries again.
+        if (!exported.Contains(key))
+        {
+            ExportKey(reference.Path, Path.Combine(backupDirectory, $"reg-{exported.Count + 1:D3}.reg"));
+            exported.Add(key);
+        }
+
+        if (wholeKey)
+        {
+            writable.Dispose(); // The key itself goes.
+            Registry.CurrentUser.DeleteSubKeyTree(key, throwOnMissingSubKey: false);
+            return true;
+        }
+        var kind = writable.GetValueKind(name);
+        var isList = !HostReferenceRules.Mentions(name, root) && (kind == RegistryValueKind.MultiString ||
+            (HostReferenceRules.HoldsLists(key) && kind is RegistryValueKind.String or RegistryValueKind.ExpandString));
+        var kept = !isList ? null : HostReferenceRules.WithoutMentions(
+            kind == RegistryValueKind.MultiString
+                ? (string[])writable.GetValue(name)!
+                : ((string)writable.GetValue(name, "", RegistryValueOptions.DoNotExpandEnvironmentNames)!).Split(';'),
+            root);
+        if (kept is null)
+            writable.DeleteValue(name, throwOnMissingValue: false);
+        else
+            writable.SetValue(name, kind == RegistryValueKind.MultiString ? kept.ToArray() : string.Join(';', kept), kind);
+        return true;
+    }
+
+    private static bool PointsInto(RegistryKey key, string name, string root) =>
+        HostReferenceRules.Mentions(name, root) || (ReadText(key, name) is { } text && HostReferenceRules.Mentions(text, root));
+
+    private static bool RemoveFile(string file, string root, string backup)
+    {
+        if (!File.Exists(file) || !HostReferenceRules.Mentions(string.Join('\0', ShortcutTarget(file), ReadForSearch(file)), root))
+            return false;
+        Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
+        File.Move(file, backup);
+        return true;
     }
 
     private static void ScanRegistry(string root, List<HostReference> found)
@@ -222,19 +265,21 @@ public sealed class WindowsHostGuard : IHostGuard
         }
     }
 
-    private static void DeleteTask(string taskPath, string backupFile)
+    private static bool DeleteTask(string taskPath, string root, string backupFile)
     {
-        var done = false;
+        var deleted = false;
         ForEachTask((folder, task) =>
         {
-            if (done || !string.Equals((string)task.Path, taskPath, StringComparison.OrdinalIgnoreCase))
+            if (deleted || !string.Equals((string)task.Path, taskPath, StringComparison.OrdinalIgnoreCase))
                 return;
-            File.WriteAllText(backupFile, (string)task.Xml);
+            string xml = task.Xml;
+            if (!HostReferenceRules.Mentions(xml, root))
+                return;
+            File.WriteAllText(backupFile, xml);
             folder.DeleteTask((string)task.Name, 0);
-            done = true;
+            deleted = true;
         });
-        if (!done)
-            throw new IOException($"task {taskPath} not found");
+        return deleted;
     }
 
     /// <summary>Walks every task folder the user can read through the Task Scheduler scripting API.</summary>

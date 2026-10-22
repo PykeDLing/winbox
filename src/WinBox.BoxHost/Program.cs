@@ -30,9 +30,11 @@ try
 {
     var request = JsonFile.Read<BoxLaunchRequest>(Path.Combine(hostDir, BoxHostContract.LaunchFile));
     Log($"launching {request.Spec.Executable}");
+    // Created before anything is reported: WinBox treats the box as running only while this event exists,
+    // and it goes away with this process however it ends.
+    using var stop = new EventWaitHandle(false, EventResetMode.ManualReset, BoxHostContract.StopEventName(request.BoxId));
     Report(new BoxRunRecord { State = BoxRunState.Starting, HostProcessId = hostPid, StartedAt = startedAt });
 
-    using var stop = new EventWaitHandle(false, EventResetMode.ManualReset, BoxHostContract.StopEventName(request.BoxId));
     using var app = await new MxcSandboxRunner().LaunchAsync(request.Spec);
     Log($"app pid {app.ProcessId}; warnings: {string.Join(" | ", app.Warnings)}");
     Report(new BoxRunRecord { State = BoxRunState.Running, HostProcessId = hostPid, AppProcessId = app.ProcessId, StartedAt = startedAt });

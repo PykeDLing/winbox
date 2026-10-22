@@ -1,3 +1,4 @@
+using System.Runtime.Versioning;
 using WinBox.Core.Sandbox;
 
 namespace WinBox.Core.Tests;
@@ -141,6 +142,80 @@ public sealed class StateFolderTests
         state.RestoreTo(restored);
 
         Assert.AreEqual("new", Read(restored, "a.txt"));
+    }
+
+    [TestMethod]
+    public void FailingToWriteTheNewCopyKeepsTheLastGoodOne()
+    {
+        var root = Path.Combine(_root, "state");
+        var run1 = Dir("run1");
+        Put(run1, "a.txt", "v1");
+        Put(run1, "b.txt", "v1");
+        new StateFolder(root).Save(run1, []);
+
+        var run2 = Dir("run2");
+        Put(run2, "a.txt", "v2");
+        Put(run2, "b.txt", "v2");
+        // The disk fills up while the new copy is written.
+        var full = new StateFolder(root)
+        {
+            OpenDestination = path => Path.GetFileName(path) == "b.txt"
+                ? throw new IOException("There is not enough space on the disk.")
+                : new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None),
+        };
+        Assert.ThrowsExactly<IOException>(() => full.Save(run2, []));
+        var run3 = Dir("run3");
+        new StateFolder(root).RestoreTo(run3);
+
+        Assert.AreEqual("v1", Read(run3, "a.txt"));
+        Assert.AreEqual("v1", Read(run3, "b.txt"));
+    }
+
+    [TestMethod]
+    [SupportedOSPlatform("windows")] // Byte-range locks.
+    public void FileThatFailsHalfwayIsNotSavedTruncated()
+    {
+        var state = new StateFolder(Path.Combine(_root, "state"));
+        var run = Dir("run");
+        var big = Path.Combine(run, "big.db");
+        File.WriteAllBytes(big, new byte[200_000]);
+        Put(run, "small.txt", "fine");
+        CopyStats stats;
+        using (var holder = new FileStream(big, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite))
+        {
+            // Another process holds a byte-range lock beyond the first chunk the copy reads.
+            holder.Lock(150_000, 1_000);
+            stats = state.Save(run, []);
+        }
+        var restored = Dir("restored");
+        state.RestoreTo(restored);
+
+        CollectionAssert.AreEqual(new[] { "big.db" }, stats.Skipped);
+        Assert.IsFalse(File.Exists(Path.Combine(restored, "big.db")));
+        Assert.AreEqual("fine", Read(restored, "small.txt"));
+    }
+
+    [TestMethod]
+    public void FilesTheRestoreCouldNotReadSurviveTheNextSave()
+    {
+        var state = new StateFolder(Path.Combine(_root, "state"));
+        var run1 = Dir("run1");
+        Put(run1, "a.txt", "v1");
+        Put(run1, "token.dat", "secret");
+        state.Save(run1, []);
+
+        var run2 = Dir("run2");
+        CopyStats restored;
+        using (new FileStream(Path.Combine(state.Current, "token.dat"), FileMode.Open, FileAccess.Read, FileShare.None))
+            restored = state.RestoreTo(run2)!;
+        Put(run2, "a.txt", "v2");
+        state.Save(run2, [], restored.Skipped);
+        var run3 = Dir("run3");
+        state.RestoreTo(run3);
+
+        CollectionAssert.AreEqual(new[] { "token.dat" }, restored.Skipped);
+        Assert.AreEqual("v2", Read(run3, "a.txt"));
+        Assert.AreEqual("secret", Read(run3, "token.dat"));
     }
 
     [TestMethod]
