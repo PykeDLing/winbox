@@ -1,0 +1,31 @@
+<Project>
+  <!--
+    Copies the per-box payloads next to the importing executable:
+      boxhost\  BoxHost, laid out into each box's package (Host\) by MsixBoxPackageManager;
+      boxshim\  BoxShim, copied into each box's Shim\ by BoxShimDeployer before every run.
+    The ProjectReferences only order the build; nothing from them is referenced as an assembly.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="$(MSBuildThisFileDirectory)..\src\WinBox.BoxHost\WinBox.BoxHost.csproj"
+                      ReferenceOutputAssembly="false" Private="false" />
+    <ProjectReference Include="$(MSBuildThisFileDirectory)..\src\WinBox.BoxShim\WinBox.BoxShim.csproj"
+                      ReferenceOutputAssembly="false" Private="false" />
+  </ItemGroup>
+
+  <Target Name="WinBoxCopyBoxPayloads" AfterTargets="Build">
+    <PropertyGroup>
+      <_WinBoxBoxHostDir>$(MSBuildThisFileDirectory)..\artifacts\boxhost\$(Configuration)\</_WinBoxBoxHostDir>
+      <_WinBoxBoxShimDir>$(MSBuildThisFileDirectory)..\artifacts\boxshim\$(Configuration)\</_WinBoxBoxShimDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <_WinBoxBoxHostFiles Include="$(_WinBoxBoxHostDir)**\*" />
+      <_WinBoxBoxShimFiles Include="$(_WinBoxBoxShimDir)**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_WinBoxBoxHostFiles)"
+          DestinationFiles="@(_WinBoxBoxHostFiles->'$(OutDir)boxhost\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_WinBoxBoxShimFiles)"
+          DestinationFiles="@(_WinBoxBoxShimFiles->'$(OutDir)boxshim\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+</Project>

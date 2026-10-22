@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/WinBox.App/WinBox.App.csproj" />
+    <Project Path="src/WinBox.BoxHost/WinBox.BoxHost.csproj" />
+    <Project Path="src/WinBox.BoxShim/WinBox.BoxShim.csproj" />
+    <Project Path="src/WinBox.Cli/WinBox.Cli.csproj" />
+    <Project Path="src/WinBox.Core/WinBox.Core.csproj" />
+    <Project Path="src/WinBox.Platform/WinBox.Platform.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/WinBox.Core.Tests/WinBox.Core.Tests.csproj" />
+  </Folder>
+</Solution>
