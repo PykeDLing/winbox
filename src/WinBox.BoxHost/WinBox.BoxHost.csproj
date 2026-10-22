@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Runs inside each box's MSIX package. Everything it starts inherits the package identity, so Windows
+    redirects the boxed app's new AppData files and HKCU writes into the package's private storage.
+    Built to a fixed folder so the App and CLI can copy it next to themselves as boxhost\.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>$(WinBoxWindowsTfm)</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <AssemblyName>WinBox.BoxHost</AssemblyName>
+    <OutDir>$(MSBuildThisFileDirectory)..\..\artifacts\boxhost\$(Configuration)\</OutDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WinBox.Core\WinBox.Core.csproj" />
+    <ProjectReference Include="..\WinBox.Platform\WinBox.Platform.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="logo.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,24 @@
+# Test installers and extracted payloads (hundreds of MB, third-party binaries)
+/samples/
+/*.exe
+
+# .NET
+bin/
+obj/
+*.user
+.vs/
+
+# Downloaded developer tools (MXC release binaries etc.)
+/.tools/
+
+# Development data root (stands in for the install directory's Data folder)
+/.data/
+
+# Build outputs shared between projects (BoxHost and BoxShim payloads)
+/artifacts/
+
+# Test runner output
+TestResults/
+
+# Development notes and investigation logs stay local
+/docs/

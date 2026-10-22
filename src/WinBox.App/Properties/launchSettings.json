@@ -1,0 +1,17 @@
+{
+  "profiles": {
+    "WinBox.App (Unpackaged)": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "WINBOX_DATA_ROOT": "$(MSBuildProjectDirectory)\\..\\..\\.data"
+      }
+    },
+    "WinBox.App (Unpackaged, Devtools)": {
+      "commandName": "Project",
+      "commandLineArgs": "--devtools",
+      "environmentVariables": {
+        "WINBOX_DATA_ROOT": "$(MSBuildProjectDirectory)\\..\\..\\.data"
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+    <!-- Version numbers are owned by Directory.Packages.props. -->
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <!-- Windows-only projects share one TFM so the App, CLI and Platform layer stay in lockstep. -->
+    <WinBoxWindowsTfm>net10.0-windows10.0.26100.0</WinBoxWindowsTfm>
+  </PropertyGroup>
+</Project>
