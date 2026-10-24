@@ -46,9 +46,26 @@ public sealed class InnoExtractor(string innoextractPath) : IPackageExtractor
             psi.ArgumentList.Add(arg);
 
         using var process = Process.Start(psi) ?? throw new InvalidOperationException("innoextract did not start.");
-        var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        var stdout = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
+        var stderr = process.StandardError.ReadToEndAsync(CancellationToken.None);
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Left running, innoextract would go on writing into the staging folder that is about to be deleted.
+            try
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(5000);
+            }
+            catch (InvalidOperationException)
+            {
+                // It finished in the meantime.
+            }
+            throw;
+        }
         if (process.ExitCode != 0)
             throw new InvalidOperationException($"innoextract exited with {process.ExitCode}: {(await stderr).Trim()} {(await stdout).Trim()}");
 

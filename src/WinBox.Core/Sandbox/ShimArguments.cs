@@ -2,9 +2,15 @@ namespace WinBox.Core.Sandbox;
 
 /// <summary>
 /// Command line of WinBox.BoxShim, the first process WinBox starts inside a box's sandbox:
-/// <c>--state &lt;dir&gt; [--exclude &lt;name&gt;]... -- &lt;app exe&gt; [app args]...</c>
+/// <c>--state &lt;dir&gt; [--exclude &lt;name&gt;]... [--control &lt;dir&gt;] -- &lt;app exe&gt; [app args]...</c>
 /// </summary>
-public sealed record ShimArguments(string StateDirectory, IReadOnlyList<string> Exclusions, string Executable, IReadOnlyList<string> Arguments)
+/// <param name="ControlDirectory">Where WinBox leaves requests for BoxShim (see <see cref="ShimControl"/>); null when nobody asks.</param>
+public sealed record ShimArguments(
+    string StateDirectory,
+    IReadOnlyList<string> Exclusions,
+    string Executable,
+    IReadOnlyList<string> Arguments,
+    string? ControlDirectory = null)
 {
     public const string ExecutableName = "WinBox.BoxShim.exe";
 
@@ -13,6 +19,8 @@ public sealed record ShimArguments(string StateDirectory, IReadOnlyList<string> 
         List<string> args = ["--state", StateDirectory];
         foreach (var name in Exclusions)
             args.AddRange(["--exclude", name]);
+        if (ControlDirectory is not null)
+            args.AddRange(["--control", ControlDirectory]);
         args.Add("--");
         args.Add(Executable);
         args.AddRange(Arguments);
@@ -22,6 +30,7 @@ public sealed record ShimArguments(string StateDirectory, IReadOnlyList<string> 
     public static ShimArguments Parse(IReadOnlyList<string> args)
     {
         string? state = null;
+        string? control = null;
         var exclusions = new List<string>();
         var i = 0;
         for (; i < args.Count && args[i] != "--"; i++)
@@ -30,6 +39,7 @@ public sealed record ShimArguments(string StateDirectory, IReadOnlyList<string> 
             {
                 case "--state" when i + 1 < args.Count: state = args[++i]; break;
                 case "--exclude" when i + 1 < args.Count: exclusions.Add(args[++i]); break;
+                case "--control" when i + 1 < args.Count: control = args[++i]; break;
                 default: throw new ArgumentException($"unexpected shim argument '{args[i]}'");
             }
         }
@@ -37,6 +47,6 @@ public sealed record ShimArguments(string StateDirectory, IReadOnlyList<string> 
             throw new ArgumentException("--state is required");
         if (i + 1 >= args.Count)
             throw new ArgumentException("the app to start is missing after --");
-        return new ShimArguments(state, exclusions, args[i + 1], args.Skip(i + 2).ToList());
+        return new ShimArguments(state, exclusions, args[i + 1], args.Skip(i + 2).ToList(), control);
     }
 }

@@ -97,12 +97,43 @@ public sealed class BoxStore
     /// Deletes a box. The directory is first renamed so a crash midway never leaves something that
     /// looks like a valid but half-empty box. Callers must make sure nothing in the box is running.
     /// </summary>
-    public void Delete(BoxEntry box)
+    /// <returns>False when the box is out of the library but some of its files could not be deleted yet
+    /// (a file still open); <see cref="CleanUpInterruptedDeletes"/> finishes the job later.</returns>
+    public bool Delete(BoxEntry box)
     {
-        var doomed = box.Paths.Root + ".deleting-" + Guid.NewGuid().ToString("N");
+        var doomed = box.Paths.Root + DeletingInfix + Guid.NewGuid().ToString("N");
         Directory.Move(box.Paths.Root, doomed);
-        // Directory.Delete removes junctions and symlinks themselves without following them.
-        Directory.Delete(doomed, recursive: true);
+        try
+        {
+            // Directory.Delete removes junctions and symlinks themselves without following them.
+            Directory.Delete(doomed, recursive: true);
+            return true;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private const string DeletingInfix = ".deleting-";
+
+    /// <summary>Finishes deletes that a crash or a file still in use interrupted. Run at startup; what is still in use waits for the next time.</summary>
+    public int CleanUpInterruptedDeletes()
+    {
+        var count = 0;
+        foreach (var dir in Directory.EnumerateDirectories(_paths.Boxes, "*" + BoxPaths.Extension + DeletingInfix + "*"))
+        {
+            try
+            {
+                Directory.Delete(dir, recursive: true);
+                count++;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                // Still in use.
+            }
+        }
+        return count;
     }
 }
 

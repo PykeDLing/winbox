@@ -5,6 +5,7 @@ using WinBox.Core.Packaging;
 using WinBox.Core.Sandbox;
 using WinBox.Platform;
 using WinBox.Platform.Packaging;
+using WinBox.Platform.Sandbox;
 
 // Developer harness for WinBox. Drives the same Core/Platform code as the App, without UI.
 Console.OutputEncoding = System.Text.Encoding.UTF8;
@@ -20,6 +21,7 @@ try
         ["package", var box] => await Package(box),
         ["run", var box, ..] => await Run(box, args.Skip(2).ToArray()),
         ["stop", var box] => Stop(box),
+        ["show", var box] => Show(box),
         ["remove", var box] => await Remove(box),
         ["guard"] => Guard(fix: false),
         ["guard", "--fix"] => Guard(fix: true),
@@ -29,6 +31,11 @@ try
 catch (ImportException e)
 {
     Console.Error.WriteLine($"import failed: {e.Failure} {e.Detail}");
+    return 2;
+}
+catch (InvalidOperationException e)
+{
+    Console.Error.WriteLine(e.Message);
     return 2;
 }
 
@@ -52,10 +59,13 @@ int Usage()
                 --direct on   DIAGNOSTICS ONLY: skip the package; AppData/HKCU writes are then denied
                 --exe PATH    DIAGNOSTICS ONLY: run PATH (with only the --arg values) instead of the app
                 --container N ask MXC for a fixed sandbox name (ignored by the BaseContainer tier)
-          stop <id|name>           force-quit a running box (its state is still saved)
+          stop <id|name>           quit a running box: ask its app to save and exit, end whatever is left
+                                   after 10 seconds, then save the box's state
+          show <id|name>           bring back the window of a running box's app
           remove <id|name>         unregister the box's package, delete the box and the host's traces of it
           guard [--fix]            look for host settings that point into the boxes (autostart, file
-                                   associations, shortcuts, tasks...); --fix removes them after a backup
+                                   associations, shortcuts, tasks...) and for Windows' records of boxes
+                                   deleted earlier; --fix removes both after a backup
         """);
     return 1;
 }
@@ -68,6 +78,10 @@ int Info()
     Console.WriteLine($"capabilities  : {string.Join(", ", support.Capabilities)}");
     Console.WriteLine($"packages      : {host.Packages.GetUnavailableReason() ?? "available (Developer Mode, unsigned loose layout)"}");
     Console.WriteLine($"innoextract   : {host.InnoextractPath ?? "not found (set WINBOX_INNOEXTRACT)"}");
+    var areas = WindowsHostAreas.Current();
+    var protectedPrograms = areas.InstalledPrograms.Count(p => areas.DataDrives.Any(d => p.StartsWith(d, StringComparison.OrdinalIgnoreCase) && p.Length > d.Length));
+    Console.WriteLine($"personal      : {string.Join(", ", areas.PersonalFolders)}");
+    Console.WriteLine($"data drives   : {(areas.DataDrives.Count == 0 ? "none" : string.Join(", ", areas.DataDrives))} ({protectedPrograms} installed programs on them stay denied)");
     var references = host.Guard.Scan(host.Paths.Boxes);
     var leaks = references.Count(r => r.Kind == HostReferenceKind.Leak);
     Console.WriteLine($"host guard    : {(leaks == 0 ? "clean" : $"{leaks} LEAKS - run `winbox guard`")} ({references.Count - leaks} traces)");
@@ -228,6 +242,14 @@ async Task<int> Run(string key, string[] options)
     return 0;
 }
 
+int Show(string key)
+{
+    var box = Find(key);
+    var sent = PackagedBoxRunner.RequestShow(box);
+    Console.WriteLine(sent ? $"asked {box.Config.Name} to show its window" : $"{box.Config.Name} is not running");
+    return sent ? 0 : 6;
+}
+
 int Stop(string key)
 {
     var box = Find(key);
@@ -241,8 +263,16 @@ async Task<int> Remove(string key)
     var box = Find(key);
     if (PackagedBoxRunner.RequestStop(box.Config.Id))
     {
-        Console.WriteLine("box was running; stop requested");
-        await Task.Delay(TimeSpan.FromSeconds(3));
+        Console.WriteLine("box was running; asked it to quit");
+        // As long as BoxHost may take: the quit and save graces, then killing the sandbox and its teardown.
+        var deadline = DateTimeOffset.Now.AddSeconds(75);
+        while (PackagedBoxRunner.IsRunning(box) && DateTimeOffset.Now < deadline)
+            await Task.Delay(500);
+        if (PackagedBoxRunner.IsRunning(box))
+        {
+            Console.Error.WriteLine($"{box.Config.Name} is still running; not removed");
+            return 8;
+        }
     }
     if (box.Config.Package is { } package)
     {
@@ -250,12 +280,11 @@ async Task<int> Remove(string key)
         await host.Packages.UnregisterAsync(package);
         Console.WriteLine($"package unregistered: {package.FamilyName}");
     }
-    host.Store.Delete(box);
-    Console.WriteLine($"removed {box.Config.Name}");
-
-    // Whatever on the host still names this box's folder is now dangling: Windows' own records of the
-    // app (display-name cache, tray icon settings...) and, if something went wrong, leaks.
-    var references = host.Guard.Scan(box.Paths.Root);
+    // Whatever on the host still names this box's folder or its package is now dangling: Windows' own records
+    // of the app (display-name cache, UserAssist, records filed under the package name...) and, if something
+    // went wrong, leaks.
+    var family = box.Config.Package?.FamilyName;
+    var references = host.Guard.Scan(box.Paths.Root, f => string.Equals(f, family, StringComparison.OrdinalIgnoreCase));
     if (references.Count > 0)
     {
         var cleanup = host.Guard.Remove(references, box.Paths.Root, GuardBackupDirectory($"remove-{box.Config.Id:N}"));
@@ -263,6 +292,9 @@ async Task<int> Remove(string key)
         foreach (var failure in cleanup.Failures)
             Console.Error.WriteLine($"  could not remove {failure}");
     }
+    Console.WriteLine(host.Store.Delete(box)
+        ? $"removed {box.Config.Name}"
+        : $"removed {box.Config.Name}, but some files are still in use; they go the next time WinBox starts");
     return 0;
 }
 
@@ -270,16 +302,21 @@ int Guard(bool fix)
 {
     var references = host.Guard.Scan(host.Paths.Boxes);
     var leaks = references.Where(r => r.Kind == HostReferenceKind.Leak).ToList();
+    var orphans = host.FindLeftovers();
     Console.WriteLine($"leaks: {leaks.Count}");
     foreach (var leak in leaks)
         Console.WriteLine($"  {leak}");
     Console.WriteLine($"traces: {references.Count - leaks.Count} (Windows' own records of boxed apps; removed with their box)");
+    Console.WriteLine($"left over from deleted boxes: {orphans.Count}");
+    foreach (var orphan in orphans)
+        Console.WriteLine($"  {orphan}");
     if (!fix)
         return leaks.Count == 0 ? 0 : 7;
 
-    if (leaks.Count == 0)
+    List<HostReference> doomed = [.. leaks, .. orphans];
+    if (doomed.Count == 0)
         return 0;
-    var cleanup = host.Guard.Remove(leaks, host.Paths.Boxes, GuardBackupDirectory("fix"));
+    var cleanup = host.Guard.Remove(doomed, host.Paths.Boxes, GuardBackupDirectory("fix"));
     Console.WriteLine($"removed {cleanup.Removed} (backup: {cleanup.BackupDirectory})");
     foreach (var failure in cleanup.Failures)
         Console.Error.WriteLine($"  could not remove {failure}");
@@ -300,10 +337,18 @@ void WarnAboutLeaks()
 string GuardBackupDirectory(string reason) =>
     Path.Combine(host.Paths.Logs, "guard", $"{DateTimeOffset.Now:yyyyMMdd-HHmmss}-{reason}");
 
+// Exactly one box or nothing: commands like remove must never pick "the first" of several matches.
 LoadedBox Find(string key)
 {
     var boxes = host.Store.Load().OfType<LoadedBox>().ToList();
-    return boxes.FirstOrDefault(b => b.Config.Id.ToString().StartsWith(key, StringComparison.OrdinalIgnoreCase))
-        ?? boxes.FirstOrDefault(b => b.Config.Name.Equals(key, StringComparison.OrdinalIgnoreCase))
-        ?? throw new InvalidOperationException($"no box matches '{key}'");
+    var byId = key.Length >= 8
+        ? boxes.Where(b => b.Config.Id.ToString().StartsWith(key, StringComparison.OrdinalIgnoreCase)).ToList()
+        : [];
+    var matches = byId.Count > 0 ? byId : boxes.Where(b => b.Config.Name.Equals(key, StringComparison.OrdinalIgnoreCase)).ToList();
+    return matches.Count switch
+    {
+        1 => matches[0],
+        0 => throw new InvalidOperationException($"no box matches '{key}' (give its name, or at least 8 characters of its id)"),
+        _ => throw new InvalidOperationException($"'{key}' matches {matches.Count} boxes ({string.Join(", ", matches.Select(b => b.Config.Id))}); give the id"),
+    };
 }

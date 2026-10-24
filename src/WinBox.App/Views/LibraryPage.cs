@@ -14,7 +14,7 @@ internal sealed record Confirmation(ConfirmKind Kind, Guid BoxId, string BoxName
 
 internal enum ConfirmKind
 {
-    ForceQuit,
+    Quit,
     Remove,
 }
 
@@ -27,6 +27,7 @@ internal sealed class LibraryPage : Component
     private const string AddGlyph = "\uE710";
     private const string PlayGlyph = "\uE768";
     private const string StopGlyph = "\uE711";
+    private const string WindowGlyph = "\uE8A7";
     private const string DeleteGlyph = "\uE74D";
     private const string PackageGlyph = "\uE7B8";
     private const string DropGlyph = "\uE896";
@@ -65,7 +66,7 @@ internal sealed class LibraryPage : Component
             setConfirm(null);
             if (question is null || result != ContentDialogResult.Primary)
                 return;
-            if (question.Kind == ConfirmKind.ForceQuit)
+            if (question.Kind == ConfirmKind.Quit)
                 library.Stop(question.BoxId);
             else
                 _ = Guarded(() => RemoveAsync(question));
@@ -73,9 +74,14 @@ internal sealed class LibraryPage : Component
 
         async Task RemoveAsync(Confirmation question)
         {
-            await library.RemoveAsync(question.BoxId);
-            if (!library.Snapshot().Boxes.Any(b => b.Id == question.BoxId))
+            var outcome = await library.RemoveAsync(question.BoxId);
+            // Not removed: the card stays and says why.
+            if (!outcome.Removed)
+                return;
+            if (outcome.Leftovers.Count == 0)
                 setNotice($"已删除“{question.BoxName}”：程序、数据、应用包和 Windows 记下的使用痕迹都已清除。");
+            else
+                setError($"已删除“{question.BoxName}”，但有 {outcome.Leftovers.Count} 处没能清理：{string.Join("；", outcome.Leftovers)}");
         }
 
         // Fire-and-forget work from a click: whatever goes wrong must show up, never vanish.
@@ -151,7 +157,9 @@ internal sealed class LibraryPage : Component
                 ? InfoBar(null, error).Error().IsClosable(true).Closed(() => setError(null))
                 : null,
         };
-        banners.AddRange(snapshot.Imports.Select(job => ImportCard(job, () => library.DismissImport(job.Key)).WithKey(job.Key.ToString("N"))));
+        banners.AddRange(snapshot.Imports.Select(job => ImportCard(job,
+            dismiss: () => library.DismissImport(job.Key),
+            cancel: () => library.CancelImport(job.Key)).WithKey(job.Key.ToString("N"))));
         banners.AddRange(snapshot.Broken.Select(b =>
             InfoBar("有一个盒子读不出来", $"{b.Paths.Root}（{b.Reason}）。WinBox 不会动它。").Warning().IsClosable(false)
                 .WithKey(b.Paths.Root)));
@@ -161,7 +169,8 @@ internal sealed class LibraryPage : Component
             : (FlexRow(snapshot.Boxes
                     .Select(entry => BoxCard(entry,
                         open: () => library.Open(entry.Id),
-                        forceQuit: () => Ask(ConfirmKind.ForceQuit, entry),
+                        show: () => library.Show(entry.Id),
+                        quit: () => Ask(ConfirmKind.Quit, entry),
                         remove: () => Ask(ConfirmKind.Remove, entry)).WithKey(entry.Id.ToString("N")))
                     .ToArray<Element>())
                 with { Wrap = FlexWrap.Wrap, ColumnGap = 16, RowGap = 16 });
@@ -184,14 +193,14 @@ internal sealed class LibraryPage : Component
                 a.UIOverride.Caption = "添加到 WinBox";
                 a.UIOverride.IsCaptionVisible = true;
             })
-            .OnDrop(a =>
-            {
-                if (a.Data.TryGetSafeLocalFiles(out var items))
-                    library.Import(items.Select(i => i.Path).Where(File.Exists));
-            }, DragOperations.Copy));
+            // Files dragged in from another process (Explorer) only arrive asynchronously: Reactor's synchronous
+            // TryGetFiles and TryGetSafeLocalFiles never see them, so the drop used to vanish without a word.
+            .OnDrop(a => _ = Guarded(async () =>
+                library.Drop((await a.Data.GetFilesAsync(CancellationToken.None) ?? []).Select(i => i.Path))),
+                DragOperations.Copy));
     }
 
-    private static Element ImportCard(ImportJob job, Action dismiss)
+    private static Element ImportCard(ImportJob job, Action dismiss, Action cancel)
     {
         var status = job.Failed
             ? VStack(2,
@@ -206,11 +215,14 @@ internal sealed class LibraryPage : Component
         return Card((FlexRow(
                 leading,
                 status.Flex(grow: 1, basis: 0),
-                job.Failed ? Button("关闭", dismiss).AutomationName("关闭") : null)
+                job.Failed
+                    ? Button("关闭", dismiss).AutomationName($"关闭{job.FileName}的提示")
+                    // Registering the package cannot be called back halfway; by then the box is all but done.
+                    : Button("取消", cancel).AutomationName($"取消添加{job.FileName}").IsEnabled(job.Step != ImportStep.Registering))
             with { ColumnGap = 16, AlignItems = FlexAlign.Center }));
     }
 
-    private static Element BoxCard(BoxEntry entry, Action open, Action forceQuit, Action remove)
+    private static Element BoxCard(BoxEntry entry, Action open, Action show, Action quit, Action remove)
     {
         var config = entry.Box.Config;
         Element icon = entry.IconPath is { } path
@@ -234,13 +246,19 @@ internal sealed class LibraryPage : Component
             ? null
             : Caption(entry.Problem).Foreground(Theme.SystemCritical).TextWrapping();
 
-        Element primary = entry.CanStop
-            ? Button(HStack(8, Glyph(StopGlyph), TextBlock("强制退出")), forceQuit).AutomationName("强制退出")
-            : Button(HStack(8, Glyph(PlayGlyph), TextBlock("打开")), open).AccentButton().AutomationName("打开").IsEnabled(entry.CanOpen);
+        // The primary button keeps its place and its accent from Open to Show window, and Delete sits at the far
+        // end: a quick second click on Open lands on Show window, never on Quit or Delete. Every child is keyed,
+        // so a button is never reused for another one along with its styling.
+        Element primary = entry.Activity == BoxActivity.Idle
+            ? Button(HStack(8, Glyph(PlayGlyph), TextBlock("打开")), open).AccentButton().AutomationName($"打开{config.Name}").IsEnabled(entry.CanOpen)
+            : Button(HStack(8, Glyph(WindowGlyph), TextBlock("显示窗口")), show).AccentButton().AutomationName($"显示{config.Name}的窗口").IsEnabled(entry.CanShow);
         var actions = (FlexRow(
-                primary,
-                Button(Glyph(DeleteGlyph), remove).AutomationName("删除").ToolTip("删除这个盒子").IsEnabled(entry.CanRemove))
-            with { ColumnGap = 8 });
+                (FlexRow(
+                        primary.WithKey("primary"),
+                        entry.CanStop ? Button(HStack(8, Glyph(StopGlyph), TextBlock("退出")), quit).AutomationName($"退出{config.Name}").WithKey("quit") : null)
+                    with { ColumnGap = 8 }).Flex(grow: 1, basis: 0).WithKey("main"),
+                Button(Glyph(DeleteGlyph), remove).AutomationName($"删除{config.Name}").ToolTip("删除这个盒子").IsEnabled(entry.CanRemove).WithKey("delete"))
+            with { ColumnGap = 8, AlignItems = FlexAlign.Center });
 
         return Card((FlexColumn(
                 (FlexRow(
@@ -285,9 +303,9 @@ internal sealed class LibraryPage : Component
                 "将删除这个软件的程序、登录状态和全部数据，以及它的应用包，并清除 Windows 记下的使用痕迹。\n\n你自己的文件（例如下载到“下载”文件夹的文件）不受影响。删除后无法恢复。",
                 "删除"),
             _ => (
-                $"强制退出“{question?.BoxName}”（{question?.Added}）？",
-                "会结束这个软件的所有进程。它的数据会先保存回盒子，但还没完成的操作（例如正在进行的传输）可能中断。",
-                "强制退出"),
+                $"退出“{question?.BoxName}”（{question?.Added}）？",
+                "会先请它自己保存并退出，10 秒后还没退出的部分会被结束。它的数据都会保存回盒子，但还没完成的操作（例如正在进行的传输）会中断。",
+                "退出"),
         };
         return ContentDialog(title, Body(body).TextWrapping(), action) with
         {

@@ -25,9 +25,13 @@ public sealed record BoxEntry(LoadedBox Box, BoxActivity Activity, string? IconP
 {
     public Guid Id => Box.Config.Id;
     public bool CanOpen => Activity == BoxActivity.Idle;
+    public bool CanShow => Activity == BoxActivity.Running;
     public bool CanStop => Activity is BoxActivity.Starting or BoxActivity.Running;
     public bool CanRemove => Activity is BoxActivity.Idle or BoxActivity.Running;
 }
+
+/// <summary>How a removal went: whether the box is gone, and what of it could not be cleaned up.</summary>
+public sealed record RemoveOutcome(bool Removed, IReadOnlyList<string> Leftovers);
 
 public sealed record ImportJob(Guid Key, string FileName, ImportStep Step, DownloadProgress? Download, string? Error)
 {
@@ -62,15 +66,21 @@ public sealed class LibraryService : IDisposable
     private readonly Lock _lock = new();
     private readonly Dictionary<Guid, BoxActivity> _activity = [];
     private readonly HashSet<Guid> _ownRuns = [];
+
+    /// <summary>Stops asked for before the box's BoxHost was listening; sent as soon as it reports in.</summary>
+    private readonly HashSet<Guid> _pendingStops = [];
     private readonly Dictionary<Guid, string> _problems = [];
     private readonly Dictionary<Guid, string> _icons = [];
     private readonly List<ImportJob> _imports = [];
+    private readonly Dictionary<Guid, CancellationTokenSource> _importCancels = [];
     private List<LoadedBox> _boxes = [];
     private List<BrokenBox> _broken = [];
     private IReadOnlyList<HostReference> _leaks = [];
     private string? _problem;
     private readonly CancellationTokenSource _stopping = new();
     private int _started;
+
+    private static readonly TimeSpan StopWait = TimeSpan.FromSeconds(75);
 
     public LibraryService(WinBoxHost host) => _host = host;
 
@@ -98,7 +108,16 @@ public sealed class LibraryService : IDisposable
         if (Interlocked.Exchange(ref _started, 1) == 1)
             return;
         _host.Paths.EnsureCreated();
-        _host.Store.CleanUpInterruptedImports();
+        try
+        {
+            _host.Store.CleanUpInterruptedImports();
+            _host.Store.CleanUpInterruptedDeletes();
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // An extraction from a previous WinBox may still hold files; the library loads all the same.
+            AppLog.Write($"cleaning up after an earlier run failed: {e.Message}");
+        }
         var sandbox = _host.Sandbox.GetSupport();
         var packages = _host.Packages.GetUnavailableReason();
         lock (_lock)
@@ -106,6 +125,35 @@ public sealed class LibraryService : IDisposable
         Reload();
         _ = Task.Run(ScanHostAsync);
         _ = Task.Run(FollowRunsAsync);
+        _ = Task.Run(() => SweepLeftoversAsync(TimeSpan.Zero));
+    }
+
+    /// <summary>
+    /// Clears Windows' records of boxes that are gone (see <see cref="WinBoxHost.FindLeftovers"/>), backing them
+    /// up first. Runs at startup and again a little after each removal: Windows files some of these records
+    /// only once the package has been removed.
+    /// </summary>
+    private async Task SweepLeftoversAsync(TimeSpan delay)
+    {
+        try
+        {
+            await Task.Delay(delay, _stopping.Token);
+            var leftovers = await Task.Run(_host.FindLeftovers);
+            if (leftovers.Count == 0)
+                return;
+            var cleanup = await Task.Run(() => _host.Guard.Remove(leftovers, _host.Paths.Boxes, GuardBackup("leftovers")));
+            AppLog.Write($"cleared {cleanup.Removed} records of deleted boxes (backup: {cleanup.BackupDirectory})");
+            foreach (var failure in cleanup.Failures)
+                AppLog.Write($"  could not clear {failure}");
+        }
+        catch (OperationCanceledException)
+        {
+            // WinBox is closing.
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            AppLog.Write($"clearing records of deleted boxes failed: {e.Message}");
+        }
     }
 
     public void Reload()
@@ -128,16 +176,65 @@ public sealed class LibraryService : IDisposable
         Notify();
     }
 
+    /// <summary>
+    /// Imports what was dropped on the window. Only plain files on a local disk are taken; anything else gets
+    /// a card saying why, so nothing dropped disappears silently.
+    /// </summary>
+    public void Drop(IEnumerable<string> paths)
+    {
+        var files = new List<string>();
+        foreach (var path in paths)
+        {
+            if (DropRejection(path) is { } reason)
+            {
+                lock (_lock)
+                    _imports.Add(new ImportJob(Guid.NewGuid(), Path.GetFileName(Path.TrimEndingDirectorySeparator(path)), ImportStep.Inspecting, null, reason));
+                Notify();
+            }
+            else
+                files.Add(path);
+        }
+        Import(files);
+    }
+
+    private static string? DropRejection(string path)
+    {
+        // UNC and device paths (\\server\share, \\?\...) are not local disks: opening them can authenticate
+        // to another machine.
+        if (!Path.IsPathFullyQualified(path) || path.StartsWith(@"\\", StringComparison.Ordinal))
+            return Texts.DropNotLocal;
+        if (Directory.Exists(path))
+            return Texts.DropFolder;
+        if (!File.Exists(path))
+            return Texts.DropMissing;
+        if (File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
+            return Texts.DropNotLocal;
+        if (Path.GetExtension(path).ToLowerInvariant() is ".lnk" or ".url")
+            return Texts.DropShortcut;
+        return null;
+    }
+
     public void Import(IEnumerable<string> files)
     {
         foreach (var file in files)
         {
             var job = new ImportJob(Guid.NewGuid(), Path.GetFileName(file), ImportStep.Inspecting, null, null);
+            var cancel = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
             lock (_lock)
+            {
                 _imports.Add(job);
+                _importCancels[job.Key] = cancel;
+            }
             Notify();
-            _ = Task.Run(() => ImportAsync(job, file));
+            _ = Task.Run(() => ImportAsync(job, file, cancel));
         }
+    }
+
+    /// <summary>Stops an import in progress; its card goes once the import has cleaned up after itself.</summary>
+    public void CancelImport(Guid key)
+    {
+        lock (_lock)
+            _importCancels.GetValueOrDefault(key)?.Cancel();
     }
 
     public void DismissImport(Guid key)
@@ -147,7 +244,7 @@ public sealed class LibraryService : IDisposable
         Notify();
     }
 
-    private async Task ImportAsync(ImportJob job, string file)
+    private async Task ImportAsync(ImportJob job, string file, CancellationTokenSource cancel)
     {
         void Update(Func<ImportJob, ImportJob> change)
         {
@@ -163,7 +260,7 @@ public sealed class LibraryService : IDisposable
         try
         {
             var progress = new InlineProgress<ImportProgress>(p => Update(j => j with { Step = StepOf(p.Stage), Download = p.Download }));
-            var box = await _host.Import.ImportAsync(file, progress, _stopping.Token);
+            var box = await _host.Import.ImportAsync(file, progress, cancel.Token);
             Update(j => j with { Step = ImportStep.Registering, Download = null });
             await RegisterAsync(box);
             await ExtractIconAsync(box);
@@ -171,13 +268,39 @@ public sealed class LibraryService : IDisposable
                 _imports.RemoveAll(j => j.Key == job.Key);
             Reload();
         }
+        catch (OperationCanceledException) when (cancel.IsCancellationRequested)
+        {
+            // Cancelled from its card, or WinBox is closing; the half-made box is already gone.
+            lock (_lock)
+                _imports.RemoveAll(j => j.Key == job.Key);
+            Notify();
+        }
         catch (ImportException e)
         {
             Update(j => j with { Error = Texts.ImportFailed(e.Failure, e.Detail) });
         }
-        catch (Exception e) when (e is not OperationCanceledException)
+        catch (TimeoutException)
+        {
+            Update(j => j with { Error = Texts.DownloadStalled });
+        }
+        catch (OperationCanceledException)
+        {
+            // Nobody cancelled it: HttpClient's own timeout ran out before the server answered.
+            Update(j => j with { Error = Texts.NetworkTimeout });
+        }
+        catch (HttpRequestException e)
+        {
+            Update(j => j with { Error = Texts.NetworkFailed(e.Message) });
+        }
+        catch (Exception e)
         {
             Update(j => j with { Error = Texts.Unexpected(e) });
+        }
+        finally
+        {
+            lock (_lock)
+                _importCancels.Remove(job.Key);
+            cancel.Dispose();
         }
     }
 
@@ -228,9 +351,15 @@ public sealed class LibraryService : IDisposable
             var spec = _host.Planner.Plan(box, DateTimeOffset.Now);
             var record = await _host.PackagedRunner.RunAsync(box, spec, onUpdate: r =>
             {
+                lock (_lock)
+                {
+                    if (_pendingStops.Contains(id) && PackagedBoxRunner.RequestStop(id))
+                        _pendingStops.Remove(id);
+                }
                 if (r.State == BoxRunState.Running)
                     SetActivity(id, current => current == BoxActivity.Starting ? BoxActivity.Running : current);
-                else if (r.State == BoxRunState.Closing)
+                // "Saved" is only said when BoxShim says so; a failed save shows up as a problem once the run ends.
+                else if (r.State == BoxRunState.Closing && r.StateSaved == true)
                     SetActivity(id, current => current == BoxActivity.Removing ? current : BoxActivity.Closing);
             });
             problem = Texts.RunProblem(record);
@@ -242,6 +371,7 @@ public sealed class LibraryService : IDisposable
         lock (_lock)
         {
             _ownRuns.Remove(id);
+            _pendingStops.Remove(id);
             // A removal that stopped this run owns the box's state until it is done.
             if (_activity.GetValueOrDefault(id) != BoxActivity.Removing)
                 _activity[id] = BoxActivity.Idle;
@@ -252,16 +382,48 @@ public sealed class LibraryService : IDisposable
         await ScanHostAsync();
     }
 
-    /// <summary>Force quit: the app's processes are killed, BoxShim still saves the box's state.</summary>
+    /// <summary>
+    /// Quits the app: it is asked to end as at sign-out and saves its own data, whatever does not end in time is
+    /// ended, and BoxShim saves the box's state either way.
+    /// </summary>
     public void Stop(Guid id)
     {
         if (!SetActivity(id, current => current is BoxActivity.Starting or BoxActivity.Running ? BoxActivity.Stopping : current))
             return;
-        if (!PackagedBoxRunner.RequestStop(id))
-            SetActivity(id, _ => BoxActivity.Idle);
+        if (PackagedBoxRunner.RequestStop(id))
+            return;
+        // Still starting and BoxHost not listening yet: the stop goes out as soon as it reports in. Dropping it
+        // instead would leave an app running that the card says is not.
+        lock (_lock)
+            _pendingStops.Add(id);
     }
 
-    public async Task RemoveAsync(Guid id)
+    /// <summary>Brings back the window of a running app that hid itself, typically in the notification area.</summary>
+    public void Show(Guid id)
+    {
+        LoadedBox? box;
+        lock (_lock)
+        {
+            box = _boxes.FirstOrDefault(b => b.Config.Id == id);
+            if (box is null || _activity.GetValueOrDefault(id) != BoxActivity.Running)
+                return;
+            _problems.Remove(id);
+        }
+        try
+        {
+            PackagedBoxRunner.RequestShow(box);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            AppLog.Write($"showing {id:N} failed: {e}");
+            lock (_lock)
+                _problems[id] = Texts.Unexpected(e);
+        }
+        Notify();
+    }
+
+    /// <summary>Deletes a box. The outcome says whether it is gone and what of it could not be cleaned up.</summary>
+    public async Task<RemoveOutcome> RemoveAsync(Guid id)
     {
         LoadedBox? box;
         bool wasRunning;
@@ -271,15 +433,17 @@ public sealed class LibraryService : IDisposable
             wasRunning = _activity.GetValueOrDefault(id) != BoxActivity.Idle;
         }
         if (box is null)
-            return;
+            return new RemoveOutcome(false, []);
         SetActivity(id, _ => BoxActivity.Removing);
+        RemoveOutcome outcome;
         try
         {
-            await Task.Run(async () =>
+            outcome = await Task.Run(async () =>
             {
                 if (wasRunning && PackagedBoxRunner.RequestStop(id))
                 {
-                    var deadline = DateTimeOffset.Now.AddSeconds(30);
+                    // BoxHost's own worst case: the quit and save graces, then killing the sandbox and MXC tearing it down.
+                    var deadline = DateTimeOffset.Now + StopWait;
                     while (PackagedBoxRunner.IsRunning(box) && DateTimeOffset.Now < deadline)
                         await Task.Delay(500);
                 }
@@ -288,11 +452,20 @@ public sealed class LibraryService : IDisposable
                     throw new InvalidOperationException(Texts.StillRunning);
                 if (box.Config.Package is { } package)
                     await _host.Packages.UnregisterAsync(package);
-                _host.Store.Delete(box);
-                var references = _host.Guard.Scan(box.Paths.Root);
-                if (references.Count > 0)
-                    _host.Guard.Remove(references, box.Paths.Root, GuardBackup($"remove-{id:N}"));
+                // Windows' records of the box: those naming its files, and those it files under the package's
+                // name and keeps after the package is gone. Cleared before the folder goes, so a folder that
+                // cannot be deleted right away does not keep them around too.
+                var family = box.Config.Package?.FamilyName;
+                var references = _host.Guard.Scan(box.Paths.Root, f => string.Equals(f, family, StringComparison.OrdinalIgnoreCase));
+                var cleanup = references.Count > 0 ? _host.Guard.Remove(references, box.Paths.Root, GuardBackup($"remove-{id:N}")) : null;
+                var leftovers = new List<string>(cleanup?.Failures ?? []);
+                if (!_host.Store.Delete(box))
+                    leftovers.Add(Texts.FolderLeftOver);
+                return new RemoveOutcome(true, leftovers);
             });
+            foreach (var leftover in outcome.Leftovers)
+                AppLog.Write($"removing {id:N} left behind: {leftover}");
+            _ = SweepLeftoversAsync(TimeSpan.FromSeconds(30));
             lock (_lock)
             {
                 _activity.Remove(id);
@@ -305,12 +478,15 @@ public sealed class LibraryService : IDisposable
             AppLog.Write($"removing {id:N} failed: {e}");
             lock (_lock)
             {
-                _activity[id] = BoxActivity.Idle;
+                // The sandbox may still be up (it did not stop in time): the card must say so rather than offer Open.
+                _activity[id] = PackagedBoxRunner.IsRunning(box) ? BoxActivity.Running : BoxActivity.Idle;
                 _problems[id] = Texts.RemoveFailed(e);
             }
+            outcome = new RemoveOutcome(false, []);
         }
         Reload();
         await ScanHostAsync();
+        return outcome;
     }
 
     public async Task<GuardCleanup> FixLeaksAsync()

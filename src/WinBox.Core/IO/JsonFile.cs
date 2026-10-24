@@ -18,7 +18,9 @@ public static class JsonFile
 
     public static T Read<T>(string path)
     {
-        using var stream = File.OpenRead(path);
+        // Shared for delete as well: another process replacing the file (BoxHost updating run.json while
+        // WinBox polls it) must not fail because it is being read.
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         return JsonSerializer.Deserialize<T>(stream, Options)
             ?? throw new JsonException($"{path} contains null.");
     }

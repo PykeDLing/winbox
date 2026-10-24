@@ -32,7 +32,10 @@ public enum BoxRunState
     Starting,
     Running,
 
-    /// <summary>The app and BoxShim have exited, so the box's state is saved; MXC is still tearing down the sandbox.</summary>
+    /// <summary>
+    /// The app and BoxShim have exited, so the box's state was saved or failed to save (see
+    /// <see cref="BoxRunRecord.StateSaved"/>); MXC is still tearing down the sandbox.
+    /// </summary>
     Closing,
     Exited,
     Failed,
@@ -47,7 +50,12 @@ public sealed record BoxRunRecord
     public required DateTimeOffset StartedAt { get; init; }
     public DateTimeOffset? EndedAt { get; init; }
     public int? ExitCode { get; init; }
+    /// <summary>WinBox asked the box to stop (it may still have ended the app gracefully).</summary>
     public bool? ForceStopped { get; init; }
+
+    /// <summary>Whether BoxShim saved the box's state; null when BoxShim did not say (it was killed).</summary>
+    public bool? StateSaved { get; init; }
+    public string? SaveError { get; init; }
     public ulong? DeniedAccesses { get; init; }
     public string? DenialsPath { get; init; }
     public string? Error { get; init; }

@@ -1,8 +1,12 @@
+using System.Text.RegularExpressions;
+
 namespace WinBox.Core.Guard;
 
 /// <summary>Which registry locations the host guard looks at, and what a box path found there means.</summary>
-public static class HostReferenceRules
+public static partial class HostReferenceRules
 {
+    private const string UserAssist = @"Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist";
+
     // Key paths are relative to HKCU and compared case-insensitively by prefix.
 
     /// <summary>
@@ -33,7 +37,7 @@ public static class HostReferenceRules
     [
         @"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache",
         @"Software\Microsoft\Windows\CurrentVersion\Explorer\FeatureUsage",
-        @"Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist",
+        UserAssist,
         @"Software\Microsoft\Windows\CurrentVersion\Search\JumplistData",
         @"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant",
         @"Control Panel\NotifyIconSettings",
@@ -87,6 +91,56 @@ public static class HostReferenceRules
             at = text.IndexOf(trimmed, at + 1, StringComparison.OrdinalIgnoreCase);
         }
         return false;
+    }
+
+    /// <summary>
+    /// Whether the value names in <paramref name="key"/> are ROT13-encoded program paths. Explorer's UserAssist
+    /// records every program started that way, so a box path never appears there as written.
+    /// </summary>
+    public static bool HasEncodedNames(string key) =>
+        IsUnder(key, UserAssist) && key.EndsWith(@"\Count", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>ROT13 of the ASCII letters, the encoding UserAssist applies to its value names (it is its own inverse).</summary>
+    public static string Rot13(string text) => string.Create(text.Length, text, static (chars, source) =>
+    {
+        for (var i = 0; i < source.Length; i++)
+        {
+            var c = source[i];
+            chars[i] = c switch
+            {
+                >= 'a' and <= 'z' => (char)('a' + (c - 'a' + 13) % 26),
+                >= 'A' and <= 'Z' => (char)('A' + (c - 'A' + 13) % 26),
+                _ => c,
+            };
+        }
+    });
+
+    /// <summary>
+    /// The box package family a registry key or value name stands for, if any. Windows files some records of a
+    /// package under its family name or app id rather than under a path, and keeps several of them after the
+    /// package is removed: "WinBox.Box.1838711ed6d7_skdvrgrnjqq2t", "…!App", or a CloudStore key ending in
+    /// "$winbox.box.1838711ed6d7_skdvrgrnjqq2t".
+    /// </summary>
+    public static string? BoxPackageFamilyIn(string name)
+    {
+        var match = BoxPackageName().Match(name);
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    [GeneratedRegex(@"(?:^|\$)(winbox\.box\.[0-9a-f]{12}_[0-9a-z]{13})(?:!app)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex BoxPackageName();
+
+    /// <summary>The entry directly under <paramref name="boxesRoot"/> that <paramref name="text"/> names ("{id}.box"), if any.</summary>
+    public static string? BoxFolderIn(string text, string boxesRoot)
+    {
+        var prefix = boxesRoot.TrimEnd('\\', '/') + @"\";
+        var at = text.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+        if (at < 0)
+            return null;
+        var start = at + prefix.Length;
+        var end = text.IndexOfAny(['\\', '/', '"', '\0', ',', ';'], start);
+        var folder = end < 0 ? text[start..] : text[start..end];
+        return folder.Length == 0 ? null : folder;
     }
 
     private static bool IsUnder(string key, string prefix) =>

@@ -14,10 +14,10 @@ namespace WinBox.Platform.Guard;
 /// </summary>
 public sealed class WindowsHostGuard : IHostGuard
 {
-    public IReadOnlyList<HostReference> Scan(string root)
+    public IReadOnlyList<HostReference> Scan(string root, Func<string, bool>? includePackage = null)
     {
         var found = new List<HostReference>();
-        ScanRegistry(root, found);
+        ScanRegistry(root, includePackage, found);
         ScanShortcuts(root, found);
         ScanTasks(root, found);
         return found;
@@ -26,9 +26,9 @@ public sealed class WindowsHostGuard : IHostGuard
     public GuardCleanup Remove(IReadOnlyCollection<HostReference> references, string root, string backupDirectory)
     {
         Directory.CreateDirectory(backupDirectory);
+        var backup = new Backup(backupDirectory);
         var removed = 0;
         var failures = new List<string>();
-        var exported = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // Each reference is checked again right before it goes: the scan may be old, and the program may have
         // been installed natively since, reusing the same value names, shortcuts or tasks.
@@ -38,7 +38,8 @@ public sealed class WindowsHostGuard : IHostGuard
             {
                 var done = reference.Location switch
                 {
-                    HostLocationKind.RegistryValue => RemoveValue(reference, root, backupDirectory, exported),
+                    HostLocationKind.RegistryValue => RemoveValue(reference, root, backup),
+                    HostLocationKind.RegistryKey => RemovePackageKey(reference, backup),
                     HostLocationKind.File => RemoveFile(reference.Path, root,
                         Path.Combine(backupDirectory, "files", $"{removed:D3}-{Path.GetFileName(reference.Path)}")),
                     HostLocationKind.ScheduledTask => DeleteTask(reference.Path, root, Path.Combine(backupDirectory, $"task-{removed:D3}.xml")),
@@ -56,10 +57,11 @@ public sealed class WindowsHostGuard : IHostGuard
     }
 
     /// <summary>
-    /// Removes a registry reference that still points inside <paramref name="root"/>. List values (REG_MULTI_SZ,
-    /// environment variables) lose only their matching entries and keep their kind.
+    /// Removes a registry reference that still points inside <paramref name="root"/>, or is still named after its
+    /// package. List values (REG_MULTI_SZ, environment variables) lose only their matching entries and keep
+    /// their kind.
     /// </summary>
-    private static bool RemoveValue(HostReference reference, string root, string backupDirectory, HashSet<string> exported)
+    private static bool RemoveValue(HostReference reference, string root, Backup backup)
     {
         var key = reference.Path[@"HKCU\".Length..];
         var name = reference.Name ?? "";
@@ -67,25 +69,25 @@ public sealed class WindowsHostGuard : IHostGuard
         if (writable is null)
             return false;
         var wholeKey = HostReferenceRules.RemovesWholeKey(key);
-        if (wholeKey ? !writable.GetValueNames().Any(n => PointsInto(writable, n, root)) : !PointsInto(writable, name, root))
+        if (wholeKey ? !writable.GetValueNames().Any(n => PointsInto(writable, key, n, root)) : !StillMatches(writable, key, name, reference, root))
             return false;
 
-        // Nothing goes without a backup of its key. A failed export throws, and the key's next value tries again.
-        if (!exported.Contains(key))
-        {
-            ExportKey(reference.Path, Path.Combine(backupDirectory, $"reg-{exported.Count + 1:D3}.reg"));
-            exported.Add(key);
-        }
-
+        // Nothing goes without a backup, and a failed backup throws before anything changed. Only what goes is
+        // saved: the keys these values sit in (MuiCache, UserAssist) are the user's whole program history.
         if (wholeKey)
         {
+            backup.SaveKey(reference.Path);
             writable.Dispose(); // The key itself goes.
             Registry.CurrentUser.DeleteSubKeyTree(key, throwOnMissingSubKey: false);
             return true;
         }
+        backup.SaveValue(key, writable, name);
         var kind = writable.GetValueKind(name);
-        var isList = !HostReferenceRules.Mentions(name, root) && (kind == RegistryValueKind.MultiString ||
-            (HostReferenceRules.HoldsLists(key) && kind is RegistryValueKind.String or RegistryValueKind.ExpandString));
+        // A value named after a box (by path or by package) goes whole; only a list that merely contains a box
+        // path keeps its other entries.
+        var isList = reference.Package is null && !HostReferenceRules.Mentions(ReadableName(key, name), root) &&
+            (kind == RegistryValueKind.MultiString ||
+             (HostReferenceRules.HoldsLists(key) && kind is RegistryValueKind.String or RegistryValueKind.ExpandString));
         var kept = !isList ? null : HostReferenceRules.WithoutMentions(
             kind == RegistryValueKind.MultiString
                 ? (string[])writable.GetValue(name)!
@@ -98,8 +100,33 @@ public sealed class WindowsHostGuard : IHostGuard
         return true;
     }
 
-    private static bool PointsInto(RegistryKey key, string name, string root) =>
-        HostReferenceRules.Mentions(name, root) || (ReadText(key, name) is { } text && HostReferenceRules.Mentions(text, root));
+    private static bool StillMatches(RegistryKey key, string keyPath, string name, HostReference reference, string root) =>
+        reference.Package is { } family
+            ? string.Equals(HostReferenceRules.BoxPackageFamilyIn(name), family, StringComparison.OrdinalIgnoreCase)
+            : PointsInto(key, keyPath, name, root);
+
+    private static bool PointsInto(RegistryKey key, string keyPath, string name, string root) =>
+        HostReferenceRules.Mentions(ReadableName(keyPath, name), root) || (ReadText(key, name) is { } text && HostReferenceRules.Mentions(text, root));
+
+    private static string ReadableName(string keyPath, string name) =>
+        HostReferenceRules.HasEncodedNames(keyPath) ? HostReferenceRules.Rot13(name) : name;
+
+    /// <summary>Removes a key Windows keeps under a box package's name, if it is still there and still named so.</summary>
+    private static bool RemovePackageKey(HostReference reference, Backup backup)
+    {
+        var key = reference.Path[@"HKCU\".Length..];
+        var name = key[(key.LastIndexOf('\\') + 1)..];
+        if (reference.Package is not { } family || !string.Equals(HostReferenceRules.BoxPackageFamilyIn(name), family, StringComparison.OrdinalIgnoreCase))
+            return false;
+        using (var existing = Registry.CurrentUser.OpenSubKey(key))
+        {
+            if (existing is null)
+                return false;
+        }
+        backup.SaveKey(reference.Path);
+        Registry.CurrentUser.DeleteSubKeyTree(key, throwOnMissingSubKey: false);
+        return true;
+    }
 
     private static bool RemoveFile(string file, string root, string backup)
     {
@@ -110,8 +137,11 @@ public sealed class WindowsHostGuard : IHostGuard
         return true;
     }
 
-    private static void ScanRegistry(string root, List<HostReference> found)
+    private static void ScanRegistry(string root, Func<string, bool>? includePackage, List<HostReference> found)
     {
+        string? Package(string name) =>
+            includePackage is not null && HostReferenceRules.BoxPackageFamilyIn(name) is { } family && includePackage(family) ? family : null;
+
         var pending = new Stack<string>(HostReferenceRules.RegistryRoots);
         while (pending.TryPop(out var path))
         {
@@ -125,14 +155,24 @@ public sealed class WindowsHostGuard : IHostGuard
             using (key)
             {
                 var kind = HostReferenceRules.ClassifyKey(path);
+                var encoded = HostReferenceRules.HasEncodedNames(path);
                 foreach (var name in key.GetValueNames())
                 {
+                    var readable = encoded ? HostReferenceRules.Rot13(name) : name;
                     var text = ReadText(key, name);
-                    if (HostReferenceRules.Mentions(name, root) || (text is not null && HostReferenceRules.Mentions(text, root)))
-                        found.Add(new HostReference(kind, HostLocationKind.RegistryValue, $@"HKCU\{path}", name, text ?? ""));
+                    if (HostReferenceRules.Mentions(readable, root) || (text is not null && HostReferenceRules.Mentions(text, root)))
+                        found.Add(new HostReference(kind, HostLocationKind.RegistryValue, $@"HKCU\{path}", name, encoded ? readable : text ?? ""));
+                    else if (Package(name) is { } family)
+                        found.Add(new HostReference(HostReferenceKind.Trace, HostLocationKind.RegistryValue, $@"HKCU\{path}", name, family, family));
                 }
                 foreach (var sub in key.GetSubKeyNames())
-                    pending.Push($@"{path}\{sub}");
+                {
+                    // A key named after the package is a record of it as a whole and goes as a whole.
+                    if (Package(sub) is { } family)
+                        found.Add(new HostReference(HostReferenceKind.Trace, HostLocationKind.RegistryKey, $@"HKCU\{path}\{sub}", null, family, family));
+                    else
+                        pending.Push($@"{path}\{sub}");
+                }
             }
         }
     }
@@ -307,6 +347,33 @@ public sealed class WindowsHostGuard : IHostGuard
                 // Some system folders are not readable without elevation; the user's own tasks are.
             }
         }
+    }
+
+    /// <summary>
+    /// The backup of one cleanup: removed values in values.reg, removed keys exported whole (they belong to one
+    /// program or package). Each entry is written through before the original goes.
+    /// </summary>
+    private sealed class Backup(string directory)
+    {
+        private readonly string _values = Path.Combine(directory, "values.reg");
+        private int _keys;
+
+        public void SaveValue(string keyPath, RegistryKey key, string name)
+        {
+            var kind = key.GetValueKind(name);
+            var data = key.GetValue(name, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+            var text = $"\r\n[HKEY_CURRENT_USER\\{keyPath}]\r\n{RegFile.ValueLine(name, kind == RegistryValueKind.None ? 0 : (int)kind, data)}\r\n";
+            var isNew = !File.Exists(_values);
+            using var file = new FileStream(_values, FileMode.Append, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough);
+            if (isNew)
+            {
+                file.Write(Encoding.Unicode.GetPreamble());
+                text = RegFile.Header + "\r\n" + text;
+            }
+            file.Write(Encoding.Unicode.GetBytes(text));
+        }
+
+        public void SaveKey(string key) => ExportKey(key, Path.Combine(directory, $"key-{++_keys:D3}.reg"));
     }
 
     private static void ExportKey(string key, string file)

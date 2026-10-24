@@ -70,6 +70,33 @@ internal static unsafe partial class Native
             ? info.ActiveProcesses
             : 0;
 
+    private const int JobObjectBasicProcessIdList = 3;
+
+    [LibraryImport("kernel32.dll", EntryPoint = "QueryInformationJobObject")]
+    private static partial int QueryJobProcessIds(nint job, int infoClass, void* info, uint length, out uint returned);
+
+    /// <summary>The ids of the processes in <paramref name="job"/> (JOBOBJECT_BASIC_PROCESS_ID_LIST: two counts, then the ids).</summary>
+    public static HashSet<uint> ProcessIds(nint job)
+    {
+        const int capacity = 1024;
+        var size = 8 + capacity * sizeof(nuint);
+        var buffer = stackalloc byte[size];
+        if (QueryJobProcessIds(job, JobObjectBasicProcessIdList, buffer, (uint)size, out _) == 0)
+            return [];
+        var count = *(uint*)(buffer + 4);
+        var ids = (nuint*)(buffer + 8);
+        var result = new HashSet<uint>();
+        for (var i = 0; i < count; i++)
+            result.Add((uint)ids[i]);
+        return result;
+    }
+
+    [LibraryImport("kernel32.dll")]
+    public static partial int TerminateJobObject(nint job, uint exitCode);
+
+    [LibraryImport("kernel32.dll")]
+    public static partial int SetProcessShutdownParameters(uint level, uint flags);
+
     [LibraryImport("kernel32.dll")]
     public static partial uint ResumeThread(nint thread);
 
@@ -126,6 +153,38 @@ internal static unsafe partial class Native
 
     [LibraryImport("user32.dll")]
     public static partial nint DefWindowProcW(nint window, uint message, nint wParam, nint lParam);
+
+    [LibraryImport("user32.dll")]
+    private static partial int EnumWindows(delegate* unmanaged<nint, nint, int> callback, nint state);
+
+    [LibraryImport("user32.dll")]
+    public static partial uint GetWindowThreadProcessId(nint window, out uint processId);
+
+    [LibraryImport("user32.dll")]
+    public static partial nint SendMessageTimeoutW(nint window, uint message, nint wParam, nint lParam, uint flags, uint timeout, out nint result);
+
+    /// <summary>Every top-level window on the desktop, hidden ones included.</summary>
+    public static List<nint> TopLevelWindows()
+    {
+        var windows = new List<nint>();
+        var handle = GCHandle.Alloc(windows);
+        try
+        {
+            EnumWindows(&CollectWindow, GCHandle.ToIntPtr(handle));
+        }
+        finally
+        {
+            handle.Free();
+        }
+        return windows;
+    }
+
+    [UnmanagedCallersOnly]
+    private static int CollectWindow(nint window, nint state)
+    {
+        ((List<nint>)GCHandle.FromIntPtr(state).Target!).Add(window);
+        return 1;
+    }
 
     [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)]
     public static partial int ShutdownBlockReasonCreate(nint window, string reason);

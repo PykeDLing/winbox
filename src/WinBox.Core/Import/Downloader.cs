@@ -14,8 +14,17 @@ public sealed record DownloadProgress(long Received, long? Total);
 /// Downloads with HttpClient. The file name comes from the final (post-redirect) URL, and the file only
 /// appears under that name once it is complete.
 /// </summary>
-public sealed class HttpDownloader(HttpClient http) : IDownloader
+/// <param name="stallTimeout">
+/// How long the body may deliver nothing before the download fails with <see cref="TimeoutException"/>.
+/// HttpClient's own timeout stops counting once the headers are in, so without this a dropped connection
+/// would leave the download waiting forever.
+/// </param>
+public sealed class HttpDownloader(HttpClient http, TimeSpan? stallTimeout = null) : IDownloader
 {
+    public static readonly TimeSpan DefaultStallTimeout = TimeSpan.FromSeconds(30);
+
+    private readonly TimeSpan _stallTimeout = stallTimeout ?? DefaultStallTimeout;
+
     public async Task<string> DownloadAsync(Uri url, string directory, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default)
     {
         Directory.CreateDirectory(directory);
@@ -35,12 +44,24 @@ public sealed class HttpDownloader(HttpClient http) : IDownloader
         var partial = target + ".partial";
         await using (var source = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
         await using (var file = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16, useAsync: true))
+        using (var stall = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
         {
             var buffer = new byte[1 << 16];
             long received = 0;
-            int read;
-            while ((read = await source.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+            while (true)
             {
+                stall.CancelAfter(_stallTimeout);
+                int read;
+                try
+                {
+                    read = await source.ReadAsync(buffer, stall.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new TimeoutException($"No data received for {_stallTimeout.TotalSeconds:0} seconds.");
+                }
+                if (read == 0)
+                    break;
                 await file.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
                 received += read;
                 progress?.Report(new DownloadProgress(received, total));

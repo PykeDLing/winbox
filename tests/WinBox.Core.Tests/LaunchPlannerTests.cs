@@ -116,6 +116,85 @@ public sealed class LaunchPlannerTests
     }
 
     [TestMethod]
+    public void DataDrivesAreGrantedFolderByFolderAndTheProgramsOnThemAreDenied()
+    {
+        using var t = new TestBox();
+        var box = t.Create(TestBox.Config());
+        // A folder standing in for a drive root.
+        var drive = Directory.CreateDirectory(Path.Combine(t.Root, "drive")).FullName;
+        var games = Directory.CreateDirectory(Path.Combine(drive, "Games")).FullName;
+        var quark = Directory.CreateDirectory(Path.Combine(drive, "Quark")).FullName;
+        var system = Directory.CreateDirectory(Path.Combine(drive, "System Volume Information"));
+        system.Attributes |= FileAttributes.Hidden | FileAttributes.System;
+        var steam = Path.Combine(games, "Steam");
+        var areas = new HostAreas(Personal, [drive], [quark + @"\", steam, @"C:\Program Files\App"]);
+
+        var spec = new LaunchPlanner(() => areas, LocalAppData).Plan(box, DateTimeOffset.Now);
+
+        // MXC grants a drive root to its own files only, so the top-level folders are granted one by one.
+        CollectionAssert.IsSubsetOf(new[] { drive, games }, spec.ReadWritePaths.ToList());
+        CollectionAssert.DoesNotContain(spec.ReadWritePaths.ToList(), quark);
+        CollectionAssert.DoesNotContain(spec.ReadWritePaths.ToList(), system.FullName);
+        CollectionAssert.IsSubsetOf(new[] { quark, steam }, spec.DeniedPaths.ToList());
+        // Not on a granted drive: never granted in the first place, so nothing to deny.
+        CollectionAssert.DoesNotContain(spec.DeniedPaths.ToList(), @"C:\Program Files\App");
+    }
+
+    [TestMethod]
+    public void ProgramEntriesThatWouldTakeAGrantBackAreSkipped()
+    {
+        using var t = new TestBox();
+        var box = t.Create(TestBox.Config());
+        var drive = Path.GetPathRoot(t.Root)!;
+        // Bad uninstall data naming a whole drive, and an install folder that holds the box itself.
+        var areas = new HostAreas([], [drive], [drive, Path.GetDirectoryName(t.Root)!]);
+
+        var spec = new LaunchPlanner(() => areas, LocalAppData).Plan(box, DateTimeOffset.Now);
+
+        CollectionAssert.DoesNotContain(spec.DeniedPaths.ToList(), drive);
+        CollectionAssert.DoesNotContain(spec.DeniedPaths.ToList(), Path.GetDirectoryName(t.Root)!);
+    }
+
+    [TestMethod]
+    public void RestOfWinBoxIsDeniedWhenAGrantedDriveHoldsIt()
+    {
+        using var t = new TestBox();
+        var box = t.Create(TestBox.Config());
+        var other = t.Create(TestBox.Config());
+        t.Paths.EnsureCreated();
+        var areas = new HostAreas([], [Path.GetPathRoot(t.Root)!], []);
+
+        var spec = new LaunchPlanner(() => areas, LocalAppData, [t.Root]).Plan(box, DateTimeOffset.Now);
+
+        CollectionAssert.Contains(spec.DeniedPaths.ToList(), other.Paths.Root);
+        CollectionAssert.DoesNotContain(spec.DeniedPaths.ToList(), box.Paths.Data);
+    }
+
+    [TestMethod]
+    public void ControlFolderIsPassedToTheShim()
+    {
+        using var t = new TestBox();
+        var box = t.Create(TestBox.Config());
+
+        var spec = new LaunchPlanner(Personal, LocalAppData).Plan(box, DateTimeOffset.Now);
+
+        Assert.AreEqual(box.Paths.Control, ShimArguments.Parse(spec.Arguments).ControlDirectory);
+    }
+
+    [TestMethod]
+    [DataRow(@"E:\Quark\", true, @"E:\Quark")]
+    [DataRow(@"""E:\Quark""", true, @"E:\Quark")]
+    [DataRow(@"E:\Quark\quark.exe,0", false, @"E:\Quark")]
+    [DataRow(@"""E:\Program Files\App\unins000.exe"" /SILENT", false, @"E:\Program Files\App")]
+    [DataRow(@"E:\Program Files\App\uninstall.exe /S", false, @"E:\Program Files\App")]
+    [DataRow(@"E:\Tools\icon.ico,3", false, @"E:\Tools")]
+    [DataRow(@"MsiExec.exe /X{1234}", false, null)]
+    [DataRow(@"\\server\share\app", true, null)]
+    [DataRow("", true, null)]
+    public void InstallLocationsAreReadFromWhatEntriesSay(string value, bool isFolder, string? expected) =>
+        Assert.AreEqual(expected, InstallLocation.FolderOf(value, isFolder));
+
+    [TestMethod]
     public void EntryOutsideAppIsRejected()
     {
         using var t = new TestBox();

@@ -22,6 +22,12 @@ public interface IBoxPackageManager
 
     bool IsRegistered(BoxPackage package);
 
+    /// <summary>
+    /// Family names of every box package registered for the current user, whichever WinBox (or data root)
+    /// registered it. Records filed under any other box package name are leftovers of removed packages.
+    /// </summary>
+    IReadOnlySet<string> RegisteredBoxFamilies();
+
     /// <summary>Brings the BoxHost files in the box's Host directory up to date with this WinBox build.</summary>
     void RefreshHost(LoadedBox box);
 

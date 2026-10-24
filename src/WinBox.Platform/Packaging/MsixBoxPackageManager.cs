@@ -93,6 +93,12 @@ public sealed partial class MsixBoxPackageManager(string boxHostPayload) : IBoxP
     public bool IsRegistered(BoxPackage package) =>
         _packages.FindPackagesForUser(string.Empty, package.FamilyName).Any();
 
+    public IReadOnlySet<string> RegisteredBoxFamilies() =>
+        _packages.FindPackagesForUser(string.Empty)
+            .Where(p => p.Id.Name.StartsWith("WinBox.Box.", StringComparison.OrdinalIgnoreCase))
+            .Select(p => p.Id.FamilyName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
     public void RefreshHost(LoadedBox box) => Payload.Sync(boxHostPayload, box.Paths.Host);
 
     public uint Activate(BoxPackage package)

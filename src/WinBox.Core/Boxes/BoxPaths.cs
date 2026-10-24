@@ -13,7 +13,8 @@ namespace WinBox.Core.Boxes;
 ///   Shim\           readonly  (WinBox.BoxShim, the first process in the sandbox; refreshed before every run)
 ///   Data\           writable  (app data: --user-data-dir points here)
 ///   Tmp\            writable  (TEMP / TMP inside the sandbox)
-///   State\          writable  (state BoxShim carries between runs, e.g. the sandbox's LocalAppData)
+///   State\          writable  (state BoxShim carries between runs, e.g. the sandbox's LocalAppData;
+///                              State\Control holds WinBox's requests to BoxShim and its last result)
 ///   Source\         private   (the installer the user dropped in)
 ///   Reports\        private   (run reports, newest 20 kept)
 ///   Host\           private   (the box's MSIX package: manifest, BoxHost, launch.json, run.json)
@@ -39,6 +40,7 @@ public sealed class BoxPaths
     public string ShimExecutable => Path.Combine(Shim, Sandbox.ShimArguments.ExecutableName);
     public string State => Path.Combine(Root, "State");
     public string LocalAppDataState => Path.Combine(State, "LocalAppData");
+    public string Control => Path.Combine(State, "Control");
     public string Source => Path.Combine(Root, "Source");
     public string Reports => Path.Combine(Root, "Reports");
     public string Host => Path.Combine(Root, "Host");

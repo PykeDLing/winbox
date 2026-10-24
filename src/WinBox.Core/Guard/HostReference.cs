@@ -15,19 +15,24 @@ public enum HostReferenceKind
 public enum HostLocationKind
 {
     RegistryValue,
+
+    /// <summary>A whole registry key, named after a box's package.</summary>
+    RegistryKey,
     File,
     ScheduledTask,
 }
 
-/// <summary>A place on the host, outside the boxes, that points at a box's files.</summary>
+/// <summary>A place on the host, outside the boxes, that points at a box's files or stands for a box's package.</summary>
 /// <param name="Path">Registry key (HKCU\...), file path, or task path.</param>
-/// <param name="Name">Registry value name ("" for the default value); null for files and tasks.</param>
-/// <param name="Detail">What it points at: the value data, or an excerpt of the file or task.</param>
-public sealed record HostReference(HostReferenceKind Kind, HostLocationKind Location, string Path, string? Name, string Detail)
+/// <param name="Name">Registry value name ("" for the default value); null for keys, files and tasks.</param>
+/// <param name="Detail">What it points at: the value data (or the decoded name), or an excerpt of the file or task.</param>
+/// <param name="Package">The box package family the record is named after, when it is found by name rather than by path.</param>
+public sealed record HostReference(HostReferenceKind Kind, HostLocationKind Location, string Path, string? Name, string Detail, string? Package = null)
 {
     public override string ToString() => Location switch
     {
         HostLocationKind.RegistryValue => $"{Path} :: {(Name is "" ? "(default)" : Name)} = {Detail}",
+        HostLocationKind.RegistryKey => $"{Path} (key of {Package})",
         _ => $"{Path} -> {Detail}",
     };
 }
@@ -40,12 +45,17 @@ public sealed record GuardCleanup(int Removed, IReadOnlyList<string> Failures, s
 /// </summary>
 public interface IHostGuard
 {
-    /// <summary>Everything in the user's registry, shortcuts and scheduled tasks that points inside <paramref name="root"/>.</summary>
-    IReadOnlyList<HostReference> Scan(string root);
+    /// <summary>
+    /// Everything in the user's registry, shortcuts and scheduled tasks that points inside <paramref name="root"/>,
+    /// plus, when <paramref name="includePackage"/> is given, the registry records Windows keeps under the name
+    /// of a box package it accepts (they are traces, and outlive the package).
+    /// </summary>
+    IReadOnlyList<HostReference> Scan(string root, Func<string, bool>? includePackage = null);
 
     /// <summary>
-    /// Removes the references that still point inside <paramref name="root"/>, first saving what each one was
-    /// into <paramref name="backupDirectory"/>. A reference that changed since it was scanned is left alone.
+    /// Removes the references that still point inside <paramref name="root"/> (or are still named after their
+    /// package), first saving what each one was into <paramref name="backupDirectory"/>. A reference that
+    /// changed since it was scanned is left alone.
     /// </summary>
     GuardCleanup Remove(IReadOnlyCollection<HostReference> references, string root, string backupDirectory);
 }

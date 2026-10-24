@@ -29,6 +29,8 @@ public sealed class PackagedBoxRunner(IBoxPackageManager packages, BoxShimDeploy
         shim.Deploy(box.Paths);
         JsonFile.Write(BoxHostContract.LaunchPath(box.Paths), new BoxLaunchRequest(box.Config.Id, spec));
         File.Delete(BoxHostContract.RunPath(box.Paths));
+        // A request or result left by an earlier run must not act on, or speak for, this one.
+        ShimControl.Reset(box.Paths.Control);
 
         var hostPid = packages.Activate(package);
         using var host = Process.GetProcessById((int)hostPid);
@@ -59,8 +61,8 @@ public sealed class PackagedBoxRunner(IBoxPackageManager packages, BoxShimDeploy
     }
 
     /// <summary>
-    /// Asks BoxHost to force-quit the app; BoxShim then saves the box's state before the sandbox closes.
-    /// Returns false when no BoxHost is listening.
+    /// Asks BoxHost to stop the app: BoxShim asks it to end as at sign-out, ends what is left, and saves the
+    /// box's state before the sandbox closes. Returns false when no BoxHost is listening (yet).
     /// </summary>
     public static bool RequestStop(Guid boxId)
     {
@@ -71,16 +73,29 @@ public sealed class PackagedBoxRunner(IBoxPackageManager packages, BoxShimDeploy
     }
 
     /// <summary>
+    /// Asks BoxShim to start the app once more inside the sandbox, which brings back the window of an app
+    /// that hid in the notification area (where the sandbox does not let it show). False if the box is not running.
+    /// </summary>
+    public static bool RequestShow(LoadedBox box)
+    {
+        if (!IsRunning(box))
+            return false;
+        ShimControl.Request(box.Paths.Control, ShimControl.ShowRequest);
+        return true;
+    }
+
+    /// <summary>
     /// Whether the box's sandbox is up right now (including while it closes), whoever started it: this
     /// WinBox, another one, or the CLI.
     /// </summary>
     /// <remarks>
     /// Liveness comes from BoxHost's stop event, not from the process id in run.json: a BoxHost killed at
     /// shutdown never writes Exited, and after a reboot its old id may belong to any process, including
-    /// ones this user cannot even query.
+    /// ones this user cannot even query. run.json only says when that BoxHost is done; a run.json that
+    /// cannot be read right now (being replaced) does not make a live box look stopped.
     /// </remarks>
     public static bool IsRunning(LoadedBox box) =>
-        ReadRun(box) is { State: BoxRunState.Starting or BoxRunState.Running or BoxRunState.Closing } && HostIsAlive(box.Config.Id);
+        HostIsAlive(box.Config.Id) && ReadRun(box) is not { State: BoxRunState.Exited or BoxRunState.Failed };
 
     public static BoxRunRecord? ReadRun(LoadedBox box)
     {

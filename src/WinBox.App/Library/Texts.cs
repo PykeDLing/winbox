@@ -39,6 +39,16 @@ public static class Texts
         _ => issue.Code.ToString(),
     };
 
+    public const string DownloadStalled = "下载中断了：30 秒没有收到任何数据。请检查网络后重新添加";
+    public const string NetworkTimeout = "连接下载服务器超时。请检查网络后重新添加";
+
+    public static string NetworkFailed(string detail) => $"下载失败，请检查网络后重新添加（{detail}）";
+
+    public const string DropFolder ="这是一个文件夹。请把安装包文件本身拖进来";
+    public const string DropShortcut = "这是一个快捷方式。请把它指向的安装包拖进来";
+    public const string DropNotLocal = "只能添加这台电脑本地磁盘上的文件";
+    public const string DropMissing = "找不到这个文件";
+
     public static string ImportFailed(ImportFailure failure, string? detail) => failure switch
     {
         ImportFailure.UnsupportedFormat => $"暂不支持这种安装包{Detail(detail)}",
@@ -53,6 +63,8 @@ public static class Texts
     {
         if (record.State == BoxRunState.Failed)
             return $"没能启动：{record.Error}";
+        if (record.StateSaved == false)
+            return $"这次运行的数据没能保存回盒子{Detail(record.SaveError)}。上一次保存的数据还在";
         if (record.ForceStopped == true || record.ExitCode is null or 0)
             return null;
         var quick = record.EndedAt is { } ended && ended - record.StartedAt < TimeSpan.FromSeconds(5);
@@ -74,7 +86,9 @@ public static class Texts
 
     public static string RemoveFailed(Exception e) => $"删除没有完成：{e.Message}";
 
-    public const string StillRunning = "它在 30 秒内没有退出，请先强制退出再删除。";
+    public const string FolderLeftOver = "盒子文件夹里还有文件在使用，暂时没删掉，WinBox 下次启动时会再删";
+
+    public const string StillRunning = "它在 75 秒内没有退出，盒子没有删除。请等它退出后再删除。";
 
     /// <summary>Tells same-named boxes apart (two imports of one installer look identical otherwise).</summary>
     public static string Added(DateTimeOffset createdAt) => $"添加于 {createdAt.ToLocalTime():M月d日 HH:mm}";

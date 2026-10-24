@@ -23,7 +23,7 @@ public sealed class WinBoxHost : IDisposable
         Store = new BoxStore(Paths);
         Sandbox = new MxcSandboxRunner();
         Planner = new LaunchPlanner(
-            LaunchPlanner.DefaultPersonalFolders(),
+            WindowsHostAreas.Current,
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             [AppContext.BaseDirectory, Paths.Root]);
         Packages = new MsixBoxPackageManager(MsixBoxPackageManager.DefaultPayloadDirectory);
@@ -43,6 +43,26 @@ public sealed class WinBoxHost : IDisposable
     }
 
     public static IReadOnlyList<IRecipe> Recipes { get; } = [new QuarkCloudDriveRecipe()];
+
+    /// <summary>
+    /// Windows' records of boxes that are gone: those filed under the name of a box package that is no longer
+    /// registered (Windows writes some of them only after the package is removed, so a removal cannot catch
+    /// them all), and those naming a box folder that no longer exists. Packages still registered count as in
+    /// use whoever registered them, so another WinBox's boxes are never taken for leftovers.
+    /// </summary>
+    public IReadOnlyList<HostReference> FindLeftovers()
+    {
+        var inUse = Store.Load().OfType<LoadedBox>()
+            .Select(b => b.Config.Package?.FamilyName).OfType<string>()
+            .Concat(Packages.RegisteredBoxFamilies())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return Guard.Scan(Paths.Boxes, family => !inUse.Contains(family))
+            .Where(r => r.Kind == HostReferenceKind.Trace &&
+                (r.Package is not null ||
+                 (HostReferenceRules.BoxFolderIn($"{r.Name}\0{r.Detail}", Paths.Boxes) is { } folder &&
+                  !Directory.Exists(Path.Combine(Paths.Boxes, folder)))))
+            .ToList();
+    }
 
     public AppPaths Paths { get; }
     public BoxStore Store { get; }
