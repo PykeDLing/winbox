@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- WinBox icon for 30 to 40 px: whole-pixel edges, no caption buttons. -->
+  <defs>
+    <linearGradient id="face" x1="0" y1="16" x2="0" y2="30" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F0F2F5"/>
+      <stop offset="0.6" stop-color="#C8CDD4"/>
+      <stop offset="1" stop-color="#A6ADB6"/>
+    </linearGradient>
+    <linearGradient id="inside" x1="0" y1="12" x2="0" y2="22" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7C848F"/>
+      <stop offset="0.3" stop-color="#9DA4AE"/>
+      <stop offset="1" stop-color="#8A929C"/>
+    </linearGradient>
+    <linearGradient id="titlebar" x1="0" y1="2" x2="0" y2="7" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2E8DE0"/>
+      <stop offset="1" stop-color="#1068BA"/>
+    </linearGradient>
+    <path id="tray" d="M4 11H28A3 3 0 0 1 31 14V26A4 4 0 0 1 27 30H5A4 4 0 0 1 1 26V14A3 3 0 0 1 4 11Z"/>
+    <path id="front" d="M1 17.5A1.5 1.5 0 0 1 2.5 16H7C9.2 16 8.8 20 11.2 20H20.8C23.2 20 22.8 16 25 16H29.5A1.5 1.5 0 0 1 31 17.5V26A4 4 0 0 1 27 30H5A4 4 0 0 1 1 26Z"/>
+    <clipPath id="trayClip"><use href="#tray"/></clipPath>
+    <clipPath id="frontClip"><use href="#front"/></clipPath>
+    <clipPath id="windowClip"><rect x="8" y="2" width="16" height="22" rx="2"/></clipPath>
+  </defs>
+  <use href="#tray" fill="#E8EBEE"/>
+  <path d="M2.5 22V15A2.5 2.5 0 0 1 5 12.5H27A2.5 2.5 0 0 1 29.5 15V22Z" fill="url(#inside)"/>
+  <rect x="8" y="2" width="16" height="22" rx="2" fill="#FFFFFF"/>
+  <g clip-path="url(#windowClip)">
+    <rect x="8" y="2" width="16" height="5" fill="url(#titlebar)"/>
+    <g fill="#C8CED6">
+      <rect x="11" y="9" width="10" height="1"/>
+      <rect x="11" y="12" width="8" height="1"/>
+      <rect x="11" y="15" width="6" height="1"/>
+      <rect x="11" y="18" width="9" height="1"/>
+    </g>
+  </g>
+  <rect x="8.5" y="2.5" width="15" height="21" rx="1.5" fill="none" stroke="#1F2A36" stroke-opacity="0.28"/>
+  <use href="#front" fill="url(#face)"/>
+  <g clip-path="url(#frontClip)">
+    <path d="M1 17.5A1.5 1.5 0 0 1 2.5 16.5H7C9.2 16.5 8.8 20.5 11.2 20.5H20.8C23.2 20.5 22.8 16.5 25 16.5H29.5A1.5 1.5 0 0 1 31 17.5" fill="none" stroke="#FFFFFF"/>
+    <path d="M1 19.5A1.5 1.5 0 0 1 2.5 18.5H7C9.2 18.5 8.8 22.5 11.2 22.5H20.8C23.2 22.5 22.8 18.5 25 18.5H29.5A1.5 1.5 0 0 1 31 19.5" fill="none" stroke="#8D949E" stroke-opacity="0.45"/>
+    <rect x="0" y="28" width="32" height="1" fill="#FFFFFF" opacity="0.3"/>
+  </g>
+  <use href="#tray" fill="none" stroke="#353C44" stroke-opacity="0.55" stroke-width="2" clip-path="url(#trayClip)"/>
+</svg>

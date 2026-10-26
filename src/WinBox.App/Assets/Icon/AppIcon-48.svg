@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <!-- WinBox icon for 48 to 80 px (and the box packages' logo): the master's shapes without the metal texture, caption buttons on whole pixels. -->
+  <defs>
+    <linearGradient id="face" x1="0" y1="23" x2="0" y2="45" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F2F4F7"/>
+      <stop offset="0.35" stop-color="#DCE0E5"/>
+      <stop offset="0.8" stop-color="#BCC2CA"/>
+      <stop offset="1" stop-color="#A2A9B2"/>
+    </linearGradient>
+    <linearGradient id="ends" x1="2" y1="0" x2="46" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3A414A" stop-opacity="0.35"/>
+      <stop offset="0.1" stop-color="#3A414A" stop-opacity="0.05"/>
+      <stop offset="0.9" stop-color="#3A414A" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#3A414A" stop-opacity="0.35"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="17" x2="0" y2="25" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#C6CCD3"/>
+    </linearGradient>
+    <linearGradient id="inside" x1="0" y1="18.5" x2="0" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7C848F"/>
+      <stop offset="0.2" stop-color="#9CA3AD"/>
+      <stop offset="0.6" stop-color="#ADB3BC"/>
+      <stop offset="1" stop-color="#8C939D"/>
+    </linearGradient>
+    <linearGradient id="titlebar" x1="0" y1="4" x2="0" y2="10" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3393E3"/>
+      <stop offset="1" stop-color="#0F6CBD"/>
+    </linearGradient>
+    <linearGradient id="page" x1="0" y1="10" x2="0" y2="34" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#ECEFF3"/>
+    </linearGradient>
+    <path id="tray" d="M6 17H42A4 4 0 0 1 46 21V39A6 6 0 0 1 40 45H8A6 6 0 0 1 2 39V21A4 4 0 0 1 6 17Z"/>
+    <path id="front" d="M2 25A2 2 0 0 1 4 23H10C13.4 23 12.8 29 16.5 29H31.5C35.2 29 34.6 23 38 23H44A2 2 0 0 1 46 25V39A6 6 0 0 1 40 45H8A6 6 0 0 1 2 39Z"/>
+    <path id="lip" d="M2 25A2 2 0 0 1 4 23H10C13.4 23 12.8 29 16.5 29H31.5C35.2 29 34.6 23 38 23H44A2 2 0 0 1 46 25"/>
+    <clipPath id="trayClip"><use href="#tray"/></clipPath>
+    <clipPath id="frontClip"><use href="#front"/></clipPath>
+    <clipPath id="windowClip"><rect x="12" y="4" width="24" height="30" rx="2.5"/></clipPath>
+    <filter id="windowShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="0.8" stdDeviation="1.2" flood-color="#0B2540" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+  <use href="#tray" fill="url(#rim)"/>
+  <path d="M3.5 32V21.5A3 3 0 0 1 6.5 18.5H41.5A3 3 0 0 1 44.5 21.5V32Z" fill="url(#inside)"/>
+  <path d="M3.5 32V21.5A3 3 0 0 1 6.5 18.5H8.5C7 19.5 6 21.5 6 24V32Z" fill="#6F7782" opacity="0.7"/>
+  <path d="M44.5 32V21.5A3 3 0 0 0 41.5 18.5H39.5C41 19.5 42 21.5 42 24V32Z" fill="#6F7782" opacity="0.7"/>
+  <rect x="12" y="4" width="24" height="30" rx="2.5" fill="url(#page)" filter="url(#windowShadow)"/>
+  <g clip-path="url(#windowClip)">
+    <rect x="12" y="4" width="24" height="6" fill="url(#titlebar)"/>
+    <!-- caption buttons on whole pixels: minimize, maximize, close -->
+    <g fill="none" stroke="#FFFFFF" stroke-width="1">
+      <path d="M21 7.5H24"/>
+      <rect x="25.5" y="5.5" width="3" height="3"/>
+      <path d="M30.6 5.1L33.4 7.9M33.4 5.1L30.6 7.9" stroke-width="1.1"/>
+    </g>
+    <g fill="#D0D5DC">
+      <rect x="15" y="13" width="18" height="2" rx="1"/>
+      <rect x="15" y="17" width="14" height="2" rx="1"/>
+      <rect x="15" y="21" width="11" height="2" rx="1"/>
+      <rect x="15" y="25" width="16" height="2" rx="1"/>
+    </g>
+  </g>
+  <rect x="12.5" y="4.5" width="23" height="29" rx="2" fill="none" stroke="#0B2540" stroke-opacity="0.2"/>
+  <use href="#front" fill="url(#face)"/>
+  <g clip-path="url(#frontClip)">
+    <rect x="0" y="16" width="48" height="32" fill="url(#ends)"/>
+    <use href="#lip" fill="none" stroke="#F7F9FB" stroke-width="4"/>
+    <use href="#lip" fill="none" stroke="#FFFFFF" stroke-width="1.5"/>
+    <use href="#lip" fill="none" stroke="#8B929C" stroke-opacity="0.55" stroke-width="0.9" transform="translate(0 2.4)"/>
+    <rect x="0" y="42.6" width="48" height="1" fill="#FFFFFF" opacity="0.35"/>
+  </g>
+  <use href="#tray" fill="none" stroke="#353C44" stroke-opacity="0.5" stroke-width="2" clip-path="url(#trayClip)"/>
+</svg>

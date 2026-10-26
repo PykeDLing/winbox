@@ -1,4 +1,8 @@
-# WinBox
+<p align="center">
+  <img src="src/WinBox.App/Assets/Icon/AppIcon.svg" width="160" alt="WinBox 图标">
+</p>
+
+<h1 align="center">WinBox</h1>
 
 把 Windows 软件装进"盒子"里运行：把安装包拖进 WinBox，软件被装进一个独立的盒子，运行时不往系统里乱写东西；删除盒子时，程序、数据和它在系统里留下的记录一起清除。
 

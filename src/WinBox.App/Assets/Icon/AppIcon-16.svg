@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- WinBox icon for 16 px: whole-pixel edges, only the shapes that still read. -->
+  <defs>
+    <linearGradient id="face" x1="0" y1="8" x2="0" y2="15" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#EEF1F4"/>
+      <stop offset="1" stop-color="#AAB1B9"/>
+    </linearGradient>
+    <path id="tray" d="M2.5 6H13.5A1.5 1.5 0 0 1 15 7.5V13A2 2 0 0 1 13 15H3A2 2 0 0 1 1 13V7.5A1.5 1.5 0 0 1 2.5 6Z"/>
+    <path id="front" d="M1 9A1 1 0 0 1 2 8H3.5C4.6 8 4.4 10 5.5 10H10.5C11.6 10 11.4 8 12.5 8H14A1 1 0 0 1 15 9V13A2 2 0 0 1 13 15H3A2 2 0 0 1 1 13Z"/>
+    <clipPath id="trayClip"><use href="#tray"/></clipPath>
+    <clipPath id="frontClip"><use href="#front"/></clipPath>
+    <clipPath id="windowClip"><rect x="4" y="1" width="8" height="11" rx="1"/></clipPath>
+  </defs>
+  <use href="#tray" fill="#E6E9ED"/>
+  <path d="M2 11V8A1 1 0 0 1 3 7H13A1 1 0 0 1 14 8V11Z" fill="#878F99"/>
+  <rect x="4" y="1" width="8" height="11" rx="1" fill="#FFFFFF"/>
+  <rect x="4" y="1" width="8" height="2" fill="#1A73C8" clip-path="url(#windowClip)"/>
+  <rect x="4.5" y="1.5" width="7" height="10" rx="0.5" fill="none" stroke="#1F2A36" stroke-opacity="0.3"/>
+  <use href="#front" fill="url(#face)"/>
+  <path d="M1 9.5A1 1 0 0 1 2 8.5H3.5C4.6 8.5 4.4 10.5 5.5 10.5H10.5C11.6 10.5 11.4 8.5 12.5 8.5H14A1 1 0 0 1 15 9.5" fill="none" stroke="#FFFFFF" clip-path="url(#frontClip)"/>
+  <use href="#tray" fill="none" stroke="#353C44" stroke-opacity="0.6" stroke-width="2" clip-path="url(#trayClip)"/>
+</svg>
