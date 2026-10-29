@@ -2,6 +2,7 @@ using WinBox.Core.Boxes;
 using WinBox.Core.Guard;
 using WinBox.Core.Import;
 using WinBox.Core.Packaging;
+using WinBox.Core.Sandbox;
 
 namespace WinBox.App.Library;
 
@@ -94,6 +95,41 @@ public static class Texts
     public static string Added(DateTimeOffset createdAt) => $"添加于 {createdAt.ToLocalTime():M月d日 HH:mm}";
 
     public static string Unexpected(Exception e) => $"出错了：{e.Message}";
+
+    /// <summary>Why WinBox did not open a box's file or folder outside the box.</summary>
+    public static string ManualOpenRefused(ManualOpenRefusal refusal, string path) => refusal switch
+    {
+        ManualOpenRefusal.NotLocalPath => $"没有打开 {path}：只能打开这台电脑本地磁盘上的文件",
+        ManualOpenRefusal.OutsideGrants => $"没有打开 {path}：它不在这个盒子能访问的位置里",
+        ManualOpenRefusal.Denied => $"没有打开 {path}：这里是已安装的程序或 WinBox 自己的文件，盒子不能访问",
+        ManualOpenRefusal.DangerousType =>
+            $"没有打开 {Path.GetFileName(path)}：程序、脚本、快捷方式和安装包不能从这里在盒子外打开。确实要运行的话，请自己在资源管理器里打开",
+        ManualOpenRefusal.NoAssociation => $"没有打开 {Path.GetFileName(path)}：这台电脑上没有能打开这种文件的程序",
+        ManualOpenRefusal.Missing => $"没有打开 {path}：找不到它，可能已被移动或删除",
+        _ => refusal.ToString(),
+    };
+
+    /// <summary>How the card's menu names one of the user's places: 桌面, 下载, E 盘…</summary>
+    public static string Place(string path)
+    {
+        if (path.Length == 3 && path[1] == ':')
+            return $"{char.ToUpperInvariant(path[0])} 盘";
+        (Environment.SpecialFolder Folder, string Name)[] known =
+        [
+            (Environment.SpecialFolder.Desktop, "桌面"),
+            (Environment.SpecialFolder.MyDocuments, "文档"),
+            (Environment.SpecialFolder.MyPictures, "图片"),
+            (Environment.SpecialFolder.MyVideos, "视频"),
+            (Environment.SpecialFolder.MyMusic, "音乐"),
+        ];
+        foreach (var (folder, name) in known)
+        {
+            if (string.Equals(Environment.GetFolderPath(folder), path, StringComparison.OrdinalIgnoreCase))
+                return name;
+        }
+        var leaf = Path.GetFileName(path);
+        return leaf.Equals("Downloads", StringComparison.OrdinalIgnoreCase) ? "下载" : leaf;
+    }
 
     public static string SandboxUnavailable(string? reason) =>
         $"这台电脑用不了 WinBox 的沙盒（需要 Windows 11 25H2）。{reason}";

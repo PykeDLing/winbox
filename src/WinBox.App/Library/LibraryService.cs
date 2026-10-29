@@ -2,9 +2,11 @@ using WinBox.Core.Boxes;
 using WinBox.Core.Guard;
 using WinBox.Core.Import;
 using WinBox.Core.Packaging;
+using WinBox.Core.Sandbox;
 using WinBox.Platform;
 using WinBox.Platform.Import;
 using WinBox.Platform.Packaging;
+using WinBox.Platform.Sandbox;
 
 namespace WinBox.App.Library;
 
@@ -29,6 +31,9 @@ public sealed record BoxEntry(LoadedBox Box, BoxActivity Activity, string? IconP
     public bool CanStop => Activity is BoxActivity.Starting or BoxActivity.Running;
     public bool CanRemove => Activity is BoxActivity.Idle or BoxActivity.Running;
 }
+
+/// <summary>One of the user's places a box may reach, as the card's menu lists it.</summary>
+public sealed record HostPlace(string Label, string Path);
 
 /// <summary>How a removal went: whether the box is gone, and what of it could not be cleaned up.</summary>
 public sealed record RemoveOutcome(bool Removed, IReadOnlyList<string> Leftovers);
@@ -83,6 +88,37 @@ public sealed class LibraryService : IDisposable
     private static readonly TimeSpan StopWait = TimeSpan.FromSeconds(75);
 
     public LibraryService(WinBoxHost host) => _host = host;
+
+    /// <summary>
+    /// The user's own places every box may reach: the personal folders and the data drives (their top-level
+    /// folders are reached from the drive). The same for all boxes; looked up once.
+    /// </summary>
+    public IReadOnlyList<HostPlace> HostPlaces => _places.Value;
+
+    private readonly Lazy<IReadOnlyList<HostPlace>> _places = new(() =>
+        [.. WindowsHostAreas.PersonalFolders().Concat(WindowsHostAreas.DataDrives()).Select(p => new HostPlace(Texts.Place(p), p))]);
+
+    /// <summary>Opens one of the box's folders in Explorer, outside the box. Null when it was opened.</summary>
+    public Task<ManualOpenRefusal?> OpenFolderOutsideAsync(Guid id, string folder) => OpenOutsideAsync(id, folder, HostOpener.OpenFolder);
+
+    /// <summary>Opens a file the box may reach with its program on this computer, outside the box. Null when it was opened.</summary>
+    public Task<ManualOpenRefusal?> OpenFileOutsideAsync(Guid id, string file) => OpenOutsideAsync(id, file, HostOpener.OpenFile);
+
+    private Task<ManualOpenRefusal?> OpenOutsideAsync(Guid id, string path, Func<LaunchSpec, string, ManualOpenRefusal?> open)
+    {
+        LoadedBox? box;
+        lock (_lock)
+            box = _boxes.FirstOrDefault(b => b.Config.Id == id);
+        if (box is null)
+            return Task.FromResult<ManualOpenRefusal?>(ManualOpenRefusal.Missing);
+        return Task.Run(() =>
+        {
+            // The grants the box's next run gets: what WinBox opens for the user is what the sandbox lets the box reach.
+            var refusal = open(_host.Planner.Plan(box, DateTimeOffset.Now), path);
+            AppLog.Write($"open outside the box {id:N}: {path} -> {refusal?.ToString() ?? "opened"}");
+            return refusal;
+        });
+    }
 
     public event Action? Changed;
 

@@ -5,6 +5,7 @@ using Microsoft.UI.Reactor.Layout;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using WinBox.App.Library;
+using WinBox.Core.Sandbox;
 using static Microsoft.UI.Reactor.Factories;
 
 namespace WinBox.App.Views;
@@ -112,6 +113,33 @@ internal sealed class LibraryPage : Component
                 library.Import(files.Select(f => f.Path));
         }
 
+        async Task OpenOutsideAsync(Task<ManualOpenRefusal?> opening, string path)
+        {
+            if (await opening is { } refusal)
+                setError(Texts.ManualOpenRefused(refusal, path));
+        }
+
+        async Task PickOutsideAsync(BoxEntry entry)
+        {
+            var picker = new Microsoft.Windows.Storage.Pickers.FileOpenPicker(window!.AppWindow.Id)
+            {
+                SuggestedStartLocation = Microsoft.Windows.Storage.Pickers.PickerLocationId.Downloads,
+                CommitButtonText = "打开",
+            };
+            picker.FileTypeFilter.Add("*");
+            if (await picker.PickSingleFileAsync() is { } file)
+                await OpenOutsideAsync(library.OpenFileOutsideAsync(entry.Id, file.Path), file.Path);
+        }
+
+        // The box's files and folders, opened by WinBox outside the box: a boxed app's own "open" cannot reach
+        // Explorer or the programs of this computer.
+        // DropDownButton takes its label as text, so a plain ellipsis rather than a Segoe Fluent glyph.
+        Element More(BoxEntry entry) => DropDownButton("⋯", MenuItems(
+                MenuSubItem("打开授权文件夹", [.. library.HostPlaces.Select(place => MenuItem(place.Label,
+                    () => _ = Guarded(() => OpenOutsideAsync(library.OpenFolderOutsideAsync(entry.Id, place.Path), place.Path))))]),
+                MenuItem("在盒外打开文件…", () => _ = Guarded(() => PickOutsideAsync(entry)))))
+            .AutomationName($"{entry.Box.Config.Name}的更多操作").ToolTip("在盒子外打开文件或文件夹");
+
         async Task FixLeaksAsync()
         {
             setFixing(true);
@@ -171,7 +199,8 @@ internal sealed class LibraryPage : Component
                         open: () => library.Open(entry.Id),
                         show: () => library.Show(entry.Id),
                         quit: () => Ask(ConfirmKind.Quit, entry),
-                        remove: () => Ask(ConfirmKind.Remove, entry)).WithKey(entry.Id.ToString("N")))
+                        remove: () => Ask(ConfirmKind.Remove, entry),
+                        more: More(entry)).WithKey(entry.Id.ToString("N")))
                     .ToArray<Element>())
                 with { Wrap = FlexWrap.Wrap, ColumnGap = 16, RowGap = 16 });
 
@@ -222,7 +251,7 @@ internal sealed class LibraryPage : Component
             with { ColumnGap = 16, AlignItems = FlexAlign.Center }));
     }
 
-    private static Element BoxCard(BoxEntry entry, Action open, Action show, Action quit, Action remove)
+    private static Element BoxCard(BoxEntry entry, Action open, Action show, Action quit, Action remove, Element more)
     {
         var config = entry.Box.Config;
         Element icon = entry.IconPath is { } path
@@ -257,6 +286,7 @@ internal sealed class LibraryPage : Component
                         primary.WithKey("primary"),
                         entry.CanStop ? Button(HStack(8, Glyph(StopGlyph), TextBlock("退出")), quit).AutomationName($"退出{config.Name}").WithKey("quit") : null)
                     with { ColumnGap = 8 }).Flex(grow: 1, basis: 0).WithKey("main"),
+                more.WithKey("more"),
                 Button(Glyph(DeleteGlyph), remove).AutomationName($"删除{config.Name}").ToolTip("删除这个盒子").IsEnabled(entry.CanRemove).WithKey("delete"))
             with { ColumnGap = 8, AlignItems = FlexAlign.Center });
 
