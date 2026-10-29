@@ -2,12 +2,17 @@
   <!-- WinBox icon for 24 px: whole-pixel edges, two content lines. -->
   <defs>
     <linearGradient id="face" x1="0" y1="13" x2="0" y2="23" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#EEF1F4"/>
-      <stop offset="1" stop-color="#A8AFB8"/>
+      <stop offset="0" stop-color="#F5F7F9"/>
+      <stop offset="0.6" stop-color="#CBD2DC"/>
+      <stop offset="1" stop-color="#ABB4C1"/>
     </linearGradient>
     <linearGradient id="inside" x1="0" y1="10" x2="0" y2="17" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#7C848F"/>
-      <stop offset="1" stop-color="#9AA1AB"/>
+      <stop offset="0" stop-color="#76829A"/>
+      <stop offset="1" stop-color="#9EA8B7"/>
+    </linearGradient>
+    <linearGradient id="titlebar" x1="0" y1="1" x2="0" y2="5" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5D8EE2"/>
+      <stop offset="1" stop-color="#3661C0"/>
     </linearGradient>
     <path id="tray" d="M3.5 9H20.5A2.5 2.5 0 0 1 23 11.5V20A3 3 0 0 1 20 23H4A3 3 0 0 1 1 20V11.5A2.5 2.5 0 0 1 3.5 9Z"/>
     <path id="front" d="M1 14.5A1.5 1.5 0 0 1 2.5 13H5.5C7.2 13 6.9 16 8.7 16H15.3C17.1 16 16.8 13 18.5 13H21.5A1.5 1.5 0 0 1 23 14.5V20A3 3 0 0 1 20 23H4A3 3 0 0 1 1 20Z"/>
@@ -15,19 +20,23 @@
     <clipPath id="frontClip"><use href="#front"/></clipPath>
     <clipPath id="windowClip"><rect x="6" y="1" width="12" height="17" rx="1.5"/></clipPath>
   </defs>
-  <use href="#tray" fill="#E6E9ED"/>
+  <!-- tray behind the window, outline included -->
+  <use href="#tray" fill="#EAEEF2"/>
   <path d="M2 17V12A2 2 0 0 1 4 10H20A2 2 0 0 1 22 12V17Z" fill="url(#inside)"/>
+  <use href="#tray" fill="none" stroke="#2F3947" stroke-opacity="0.6" stroke-width="2" clip-path="url(#trayClip)"/>
+  <!-- window -->
   <rect x="6" y="1" width="12" height="17" rx="1.5" fill="#FFFFFF"/>
   <g clip-path="url(#windowClip)">
-    <rect x="6" y="1" width="12" height="4" fill="#1A73C8"/>
-    <rect x="8" y="7" width="8" height="1" fill="#C3C9D1"/>
-    <rect x="8" y="10" width="6" height="1" fill="#C3C9D1"/>
+    <rect x="6" y="1" width="12" height="4" fill="url(#titlebar)"/>
+    <rect x="8" y="7" width="7" height="1" fill="#C3CDDB"/>
+    <rect x="8" y="10" width="8" height="1" fill="#D3DAE4"/>
   </g>
-  <rect x="6.5" y="1.5" width="11" height="16" rx="1" fill="none" stroke="#1F2A36" stroke-opacity="0.3"/>
+  <rect x="6.5" y="1.5" width="11" height="16" rx="1" fill="none" stroke="#1B2B48" stroke-opacity="0.3"/>
+  <!-- front wall: lit lip and crease, outlined along the sides and floor only -->
   <use href="#front" fill="url(#face)"/>
   <g clip-path="url(#frontClip)">
     <path d="M1 14.5A1.5 1.5 0 0 1 2.5 13.5H5.5C7.2 13.5 6.9 16.5 8.7 16.5H15.3C17.1 16.5 16.8 13.5 18.5 13.5H21.5A1.5 1.5 0 0 1 23 14.5" fill="none" stroke="#FFFFFF"/>
-    <path d="M1 16.5A1.5 1.5 0 0 1 2.5 15.5H5.5C7.2 15.5 6.9 18.5 8.7 18.5H15.3C17.1 18.5 16.8 15.5 18.5 15.5H21.5A1.5 1.5 0 0 1 23 16.5" fill="none" stroke="#8D949E" stroke-opacity="0.45"/>
+    <path d="M1 16.5A1.5 1.5 0 0 1 2.5 15.5H5.5C7.2 15.5 6.9 18.5 8.7 18.5H15.3C17.1 18.5 16.8 15.5 18.5 15.5H21.5A1.5 1.5 0 0 1 23 16.5" fill="none" stroke="#7C889A" stroke-opacity="0.45"/>
+    <path d="M1 14V20A3 3 0 0 0 4 23H20A3 3 0 0 0 23 20V14" fill="none" stroke="#2F3947" stroke-opacity="0.6" stroke-width="2"/>
   </g>
-  <use href="#tray" fill="none" stroke="#353C44" stroke-opacity="0.6" stroke-width="2" clip-path="url(#trayClip)"/>
 </svg>
