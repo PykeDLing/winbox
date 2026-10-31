@@ -3,6 +3,7 @@
   <!-- Windows implementations of Core abstractions: MXC sandbox, installer extraction, PE metadata. -->
   <PropertyGroup>
     <TargetFramework>$(WinBoxWindowsTfm)</TargetFramework>
+    <IsAotCompatible>true</IsAotCompatible>
     <!-- Source-generated COM and LibraryImport for package activation. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>

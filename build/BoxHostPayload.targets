@@ -1,6 +1,6 @@
 <Project>
   <!--
-    Copies the per-box payloads next to the importing executable, on build and on publish:
+    Puts the per-box payloads next to the importing executable, on build and on publish:
       boxhost\  BoxHost, laid out into each box's package (Host\) by MsixBoxPackageManager;
       boxshim\  BoxShim, copied into each box's Shim\ by BoxShimDeployer before every run.
     The ProjectReferences only order the build; nothing from them is referenced as an assembly.
@@ -30,15 +30,14 @@
           SkipUnchangedFiles="true" />
   </Target>
 
-  <!-- Without these an installed WinBox imports boxes but cannot run them. -->
+  <!--
+    A publish compiles both payloads ahead of time, straight into boxhost\ and boxshim\ of the publish
+    directory. Without them an installed WinBox imports boxes but cannot run them.
+  -->
   <Target Name="WinBoxPublishBoxPayloads" AfterTargets="Publish">
-    <ItemGroup>
-      <_WinBoxBoxHostFiles Include="$(_WinBoxBoxHostDir)**\*" />
-      <_WinBoxBoxShimFiles Include="$(_WinBoxBoxShimDir)**\*" />
-    </ItemGroup>
-    <Copy SourceFiles="@(_WinBoxBoxHostFiles)"
-          DestinationFiles="@(_WinBoxBoxHostFiles->'$(PublishDir)boxhost\%(RecursiveDir)%(Filename)%(Extension)')" />
-    <Copy SourceFiles="@(_WinBoxBoxShimFiles)"
-          DestinationFiles="@(_WinBoxBoxShimFiles->'$(PublishDir)boxshim\%(RecursiveDir)%(Filename)%(Extension)')" />
+    <MSBuild Projects="$(MSBuildThisFileDirectory)..\src\WinBox.BoxHost\WinBox.BoxHost.csproj" Targets="Publish"
+             Properties="Configuration=$(Configuration);PublishDir=$([System.IO.Path]::GetFullPath('$(PublishDir)'))boxhost\" />
+    <MSBuild Projects="$(MSBuildThisFileDirectory)..\src\WinBox.BoxShim\WinBox.BoxShim.csproj" Targets="Publish"
+             Properties="Configuration=$(Configuration);PublishDir=$([System.IO.Path]::GetFullPath('$(PublishDir)'))boxshim\" />
   </Target>
 </Project>

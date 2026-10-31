@@ -2,10 +2,14 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>$(WinBoxWindowsTfm)</TargetFramework>
+    <AssemblyName>WinBox</AssemblyName>
+    <RootNamespace>WinBox.App</RootNamespace>
     <!-- MXC ProcessContainer needs Windows 11 25H2 (26200.9278+); that is checked at runtime. -->
     <TargetPlatformMinVersion>10.0.26100.0</TargetPlatformMinVersion>
     <SupportedOSPlatformVersion>10.0.26100.0</SupportedOSPlatformVersion>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishAot>true</PublishAot>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
     <UseWinUI>true</UseWinUI>
@@ -13,21 +17,10 @@
     <!--
       WinBox must run without package identity: inside a package context Windows virtualizes the files
       WinBox hands to MXC, and the sandbox cannot be created from them (see AppPaths). The Windows App
-      SDK runtime ships next to the exe; only the .NET runtime has to be installed.
+      SDK runtime ships next to the exe, and the exe is native (Native AOT), so nothing has to be installed.
     -->
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
-  </PropertyGroup>
-
-  <!--
-    Published framework-dependent and untrimmed. BoxHost and BoxShim need the installed .NET runtime anyway
-    (they are copied into every box, so they stay small), and trimming switches off two things WinBox relies
-    on: built-in COM (the host guard's shortcut and Task Scheduler scans) and reflection-based JSON (box.json
-    and every other file in JsonFile).
-  -->
-  <PropertyGroup Condition="'$(Configuration)' != 'Debug'">
-    <PublishReadyToRun>true</PublishReadyToRun>
-    <SelfContained>false</SelfContained>
   </PropertyGroup>
 
   <ItemGroup>
@@ -50,7 +43,7 @@
   </ItemGroup>
 
   <!--
-    The app's resource index (WinBox.App.pri, its compiled XAML resources) is only published by the MSIX
+    The app's resource index (WinBox.pri, its compiled XAML resources) is only published by the MSIX
     tooling, which an unpackaged app does without. Left out, WinUI fails to parse XAML at startup (0x802B000A).
   -->
   <Target Name="WinBoxPublishProjectPri" AfterTargets="ComputeResolvedFilesToPublishList">

@@ -1,7 +1,8 @@
 #requires -Version 7
 # Builds the release zip: ./scripts/release.ps1 [-Innoextract <path to innoextract.exe>]
-# Publishes WinBox framework-dependent with the box payloads, bundles innoextract and its licences in tools\,
-# and writes artifacts\release\WinBox-<version>-win-x64.zip with its SHA-256.
+# Publishes WinBox and its box payloads as native code (Native AOT; needs the Visual Studio Build Tools' C++
+# tools), bundles innoextract and its licences in tools\, and writes artifacts\release\WinBox-<version>-win-x64.zip
+# with its SHA-256. The debug symbols stay out of the zip, in artifacts\release\symbols\.
 param([string] $Innoextract = (Get-Command innoextract -ErrorAction SilentlyContinue).Source)
 
 $ErrorActionPreference = 'Stop'
@@ -13,14 +14,18 @@ $innoDir = Split-Path ((Get-Item $Innoextract).Target ?? $Innoextract)
 
 $out = Join-Path $repo 'artifacts\release'
 $stage = Join-Path $out 'WinBox'
+$symbols = Join-Path $out 'symbols'
 $zip = Join-Path $out "WinBox-$version-win-x64.zip"
-# The payload folders keep whatever older builds left there, and every file in them is shipped.
-foreach ($dir in 'artifacts\boxhost\Release', 'artifacts\boxshim\Release', 'artifacts\release') {
-    Remove-Item (Join-Path $repo $dir) -Recurse -Force -ErrorAction SilentlyContinue
-}
+Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
 
 dotnet publish (Join-Path $repo 'src\WinBox.App\WinBox.App.csproj') -c Release -o $stage -nologo
 if ($LASTEXITCODE) { throw "dotnet publish failed ($LASTEXITCODE)" }
+
+foreach ($pdb in Get-ChildItem $stage -Recurse -Filter *.pdb) {
+    $target = Join-Path $symbols ([IO.Path]::GetRelativePath($stage, $pdb.FullName))
+    New-Item -ItemType Directory (Split-Path $target) -Force | Out-Null
+    Move-Item $pdb.FullName $target
+}
 
 $tools = New-Item -ItemType Directory (Join-Path $stage 'tools')
 Copy-Item (Join-Path $innoDir 'innoextract.exe') $tools

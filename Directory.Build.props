@@ -7,4 +7,12 @@
     <!-- The release version, in every exe's file properties; GitHub releases are tagged v$(Version). -->
     <Version>0.1.0</Version>
   </PropertyGroup>
+
+  <!--
+    WinBox is compiled ahead of time (Native AOT). Native calls and COM go through source-generated
+    marshalling only; with runtime marshalling disabled, anything that would need it fails to compile.
+  -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.DisableRuntimeMarshallingAttribute" />
+  </ItemGroup>
 </Project>

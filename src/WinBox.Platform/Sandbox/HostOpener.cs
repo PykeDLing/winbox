@@ -105,16 +105,19 @@ public static unsafe partial class HostOpener
 
     private static void Shell(string path)
     {
-        var info = new ShellExecuteInfo
+        fixed (char* verb = "open", file = path)
         {
-            cbSize = Marshal.SizeOf<ShellExecuteInfo>(),
-            fMask = SeeMaskFlagNoUi,
-            lpVerb = "open",
-            lpFile = path,
-            nShow = SwShowNormal,
-        };
-        if (!ShellExecuteExW(ref info))
-            throw new Win32Exception();
+            var info = new ShellExecuteInfo
+            {
+                cbSize = sizeof(ShellExecuteInfo),
+                fMask = SeeMaskFlagNoUi,
+                lpVerb = verb,
+                lpFile = file,
+                nShow = SwShowNormal,
+            };
+            if (!ShellExecuteExW(ref info))
+                throw new Win32Exception();
+        }
     }
 
     private const uint FileReadAttributes = 0x80;
@@ -131,20 +134,20 @@ public static unsafe partial class HostOpener
     private const uint SeeMaskFlagNoUi = 0x400;
     private const int SwShowNormal = 1;
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    [StructLayout(LayoutKind.Sequential)]
     private struct ShellExecuteInfo
     {
         public int cbSize;
         public uint fMask;
         public nint hwnd;
-        public string? lpVerb;
-        public string lpFile;
-        public string? lpParameters;
-        public string? lpDirectory;
+        public char* lpVerb;
+        public char* lpFile;
+        public char* lpParameters;
+        public char* lpDirectory;
         public int nShow;
         public nint hInstApp;
         public nint lpIDList;
-        public string? lpClass;
+        public char* lpClass;
         public nint hkeyClass;
         public uint dwHotKey;
         public nint hIconOrMonitor;
@@ -163,6 +166,7 @@ public static unsafe partial class HostOpener
     [LibraryImport("shlwapi.dll", StringMarshalling = StringMarshalling.Utf16)]
     private static partial int AssocQueryStringW(int flags, int str, string assoc, string? extra, char* output, ref uint size);
 
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool ShellExecuteExW(ref ShellExecuteInfo info);
+    [LibraryImport("shell32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ShellExecuteExW(ref ShellExecuteInfo info);
 }

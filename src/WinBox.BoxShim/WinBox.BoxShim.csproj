@@ -4,12 +4,13 @@
     The first process inside a box's sandbox (see LaunchPlanner). Restores the state WinBox keeps for the
     box into the sandbox's LocalAppData, runs the app, and saves the state back when every process of the
     app has exited or Windows ends the session. Copied into every box, so it stays small: plain
-    net10.0-windows without the Windows SDK projection that BoxHost carries.
+    net10.0-windows without the Windows SDK projection that BoxHost carries, compiled ahead of time into one exe.
   -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishAot>true</PublishAot>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <OutDir>$(MSBuildThisFileDirectory)..\..\artifacts\boxshim\$(Configuration)\</OutDir>
   </PropertyGroup>

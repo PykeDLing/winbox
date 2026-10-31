@@ -10,7 +10,7 @@ namespace WinBox.App;
 /// brings back the window of the WinBox already running, rather than a second one following, starting and
 /// stopping the same boxes.
 /// </summary>
-internal static class SingleInstance
+internal static partial class SingleInstance
 {
     /// <summary>Another start was handed over to this WinBox. Raised on a background thread.</summary>
     public static event Action? ShowRequested;
@@ -42,7 +42,6 @@ internal static class SingleInstance
         return "WinBox-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(root)))[..16];
     }
 
-    // DllImport, not LibraryImport: that would need unsafe code in the App for one blittable call.
-    [DllImport("user32.dll")]
-    private static extern int AllowSetForegroundWindow(uint processId);
+    [LibraryImport("user32.dll")]
+    private static partial int AllowSetForegroundWindow(uint processId);
 }

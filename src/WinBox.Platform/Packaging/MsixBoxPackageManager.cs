@@ -103,20 +103,9 @@ public sealed partial class MsixBoxPackageManager(string boxHostPayload) : IBoxP
 
     public uint Activate(BoxPackage package)
     {
-        Guid clsid = new("45BA127D-10A8-46EA-8AB7-56EA9078943C");
-        var iid = typeof(IApplicationActivationManager).GUID;
-        Marshal.ThrowExceptionForHR(CoCreateInstance(clsid, 0, ClsctxAll, iid, out var pointer));
-        try
-        {
-            var manager = (IApplicationActivationManager)new StrategyBasedComWrappers()
-                .GetOrCreateObjectForComInstance(pointer, CreateObjectFlags.None);
-            Marshal.ThrowExceptionForHR(manager.ActivateApplication(package.AppUserModelId, null, 0, out var processId));
-            return processId;
-        }
-        finally
-        {
-            Marshal.Release(pointer);
-        }
+        var manager = ComObjects.Create<IApplicationActivationManager>(new Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C"));
+        Marshal.ThrowExceptionForHR(manager.ActivateApplication(package.AppUserModelId, null, 0, out var processId));
+        return processId;
     }
 
     private static bool IsDeveloperModeOn()
@@ -124,11 +113,6 @@ public sealed partial class MsixBoxPackageManager(string boxHostPayload) : IBoxP
         using var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock");
         return key?.GetValue("AllowDevelopmentWithoutDevLicense") is int value && value != 0;
     }
-
-    private const uint ClsctxAll = 0x17;
-
-    [LibraryImport("ole32.dll")]
-    private static partial int CoCreateInstance(in Guid rclsid, nint pUnkOuter, uint dwClsContext, in Guid riid, out nint ppv);
 }
 
 /// <summary>Shell activation of packaged apps by AppUserModelID (shobjidl_core.h). Only the first method is used.</summary>

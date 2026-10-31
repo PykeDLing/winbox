@@ -12,14 +12,13 @@ WinBox 是 [MacBox](https://github.com/PykeDLing/macbox) 的 Windows 版。
 
 - Windows 11 25H2（build 26200.9278 或更高），x64。MXC 的 ProcessContainer 需要这个版本。
 - 打开**开发者模式**（设置 > 系统 > 开发者选项），WinBox 要用它为每个盒子注册应用包。
-- 安装 [.NET 10 运行时](https://dotnet.microsoft.com/download/dotnet/10.0)（x64，选".NET 运行时"即可）。
 - 以管理员身份运行一次 `wxc-host-prep prepare-system-drive`，为沙盒准备系统盘的访问权限。这个工具在 [MXC 发布页](https://github.com/microsoft/mxc/releases)的 `mxc-release-binaries.zip` 里（`bin\x64\wxc-host-prep.exe`）。
 
 ## 下载和安装
 
 1. 先满足上面的系统要求。
 2. 从 [Releases](https://github.com/PykeDLing/winbox/releases) 下载 `WinBox-<版本>-win-x64.zip`，解压到一个**路径短、当前用户可写**的文件夹，例如 `D:\WinBox`。盒子和它们的数据都放在这个文件夹下的 `Data\` 里。
-3. 运行 `WinBox.App.exe`。第一次运行时 Windows 可能提示"Windows 已保护你的电脑"，点"更多信息"，再点"仍要运行"。
+3. 运行 `WinBox.exe`。第一次运行时 Windows 可能提示"Windows 已保护你的电脑"，点"更多信息"，再点"仍要运行"。
 
 发布包自带 [innoextract](https://constexpr.org/innoextract/)（`tools\`），不用另外安装。卸载 WinBox：先在 WinBox 里删除所有盒子，再删除 WinBox 文件夹。
 
@@ -57,7 +56,7 @@ WinBox 是 [MacBox](https://github.com/PykeDLing/macbox) 的 Windows 版。
 
 ## 从源码构建
 
-需要 [.NET 10 SDK](https://dotnet.microsoft.com/)，不需要 Visual Studio。导入 Inno Setup 安装包需要 innoextract：放在 PATH 里，或用环境变量 `WINBOX_INNOEXTRACT` 指定位置。
+需要 [.NET 10 SDK](https://dotnet.microsoft.com/)。生成发布包还需要 [Visual Studio 生成工具](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio)里的"使用 C++ 的桌面开发"（只要命令行工具，不需要 Visual Studio 本体）：WinBox 用 Native AOT 编译成本机代码，运行时不需要 .NET。导入 Inno Setup 安装包需要 innoextract：放在 PATH 里，或用环境变量 `WINBOX_INNOEXTRACT` 指定位置。
 
 在仓库根目录：
 

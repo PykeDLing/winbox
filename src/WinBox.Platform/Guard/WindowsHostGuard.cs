@@ -227,28 +227,23 @@ public sealed class WindowsHostGuard : IHostGuard
     }
 
     /// <summary>
-    /// Where a .lnk or .url points, resolved by the shell. The file itself may not hold the path in one piece:
-    /// a target under a shared folder is stored as \\machine\share plus a suffix, next to a relative path.
+    /// Where a .lnk points, resolved by the shell. The file itself may not hold the path in one piece: a target
+    /// under a shared folder is stored as \\machine\share plus a suffix, next to a relative path. A .url file
+    /// holds its URL as plain text, which <see cref="ReadForSearch"/> covers.
     /// </summary>
     private static string? ShortcutTarget(string file)
     {
-        if (!file.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase) && !file.EndsWith(".url", StringComparison.OrdinalIgnoreCase))
+        if (!file.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase))
             return null;
         try
         {
-            s_shell ??= Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell")!);
-            dynamic link = ((dynamic)s_shell!).CreateShortcut(file);
-            return file.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase)
-                ? $"{link.TargetPath}\0{link.Arguments}\0{link.WorkingDirectory}"
-                : (string)link.TargetPath;
+            return ShellLinks.Read(file);
         }
-        catch (Exception e) when (e is COMException or ArgumentException or NullReferenceException)
+        catch (Exception e) when (e is COMException or ArgumentException or UnauthorizedAccessException or IOException)
         {
             return null;
         }
     }
-
-    private static object? s_shell;
 
     private static IEnumerable<string> SafeEnumerate(string dir, string pattern, SearchOption option)
     {
@@ -294,9 +289,9 @@ public sealed class WindowsHostGuard : IHostGuard
         {
             ForEachTask((folder, task) =>
             {
-                string xml = task.Xml;
+                var xml = task.GetXml();
                 if (HostReferenceRules.Mentions(xml, root))
-                    found.Add(new HostReference(HostReferenceKind.Leak, HostLocationKind.ScheduledTask, (string)task.Path, null, Excerpt(xml, root)));
+                    found.Add(new HostReference(HostReferenceKind.Leak, HostLocationKind.ScheduledTask, task.GetPath(), null, Excerpt(xml, root)));
             });
         }
         catch (COMException)
@@ -310,37 +305,34 @@ public sealed class WindowsHostGuard : IHostGuard
         var deleted = false;
         ForEachTask((folder, task) =>
         {
-            if (deleted || !string.Equals((string)task.Path, taskPath, StringComparison.OrdinalIgnoreCase))
+            if (deleted || !string.Equals(task.GetPath(), taskPath, StringComparison.OrdinalIgnoreCase))
                 return;
-            string xml = task.Xml;
+            var xml = task.GetXml();
             if (!HostReferenceRules.Mentions(xml, root))
                 return;
             File.WriteAllText(backupFile, xml);
-            folder.DeleteTask((string)task.Name, 0);
+            folder.DeleteTask(task.GetName(), 0);
             deleted = true;
         });
         return deleted;
     }
 
-    /// <summary>Walks every task folder the user can read through the Task Scheduler scripting API.</summary>
-    private static void ForEachTask(Action<dynamic, dynamic> visit)
+    /// <summary>Walks every task folder the user can read through the Task Scheduler API.</summary>
+    private static void ForEachTask(Action<ITaskFolder, IRegisteredTask> visit)
     {
-        var type = Type.GetTypeFromProgID("Schedule.Service") ?? throw new COMException("Schedule.Service is not registered");
-        dynamic service = Activator.CreateInstance(type)!;
-        service.Connect();
-        var folders = new Stack<dynamic>();
-        folders.Push(service.GetFolder(@"\"));
+        var folders = new Stack<ITaskFolder>();
+        folders.Push(ScheduledTasks.Connect().GetFolder(@"\"));
         while (folders.Count > 0)
         {
             var folder = folders.Pop();
             try
             {
-                dynamic tasks = folder.GetTasks(1); // TASK_ENUM_HIDDEN
-                for (var i = 1; i <= (int)tasks.Count; i++)
-                    visit(folder, tasks[i]);
-                dynamic subfolders = folder.GetFolders(0);
-                for (var i = 1; i <= (int)subfolders.Count; i++)
-                    folders.Push(subfolders[i]);
+                var tasks = folder.GetTasks(ScheduledTasks.EnumHidden);
+                for (var i = 1; i <= tasks.GetCount(); i++)
+                    visit(folder, tasks.GetItem(Variant.Int32(i)));
+                var subfolders = folder.GetFolders(0);
+                for (var i = 1; i <= subfolders.GetCount(); i++)
+                    folders.Push(subfolders.GetItem(Variant.Int32(i)));
             }
             catch (Exception e) when (e is COMException or UnauthorizedAccessException)
             {

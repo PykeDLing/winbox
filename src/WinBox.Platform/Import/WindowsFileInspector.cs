@@ -6,7 +6,7 @@ using WinBox.Core.Import;
 namespace WinBox.Platform.Import;
 
 /// <summary>Reads PE version resources and verifies Authenticode signatures with WinVerifyTrust.</summary>
-public sealed class WindowsFileInspector : IFileInspector
+public sealed unsafe partial class WindowsFileInspector : IFileInspector
 {
     public ExecutableInfo? ReadExecutableInfo(string path)
     {
@@ -43,33 +43,27 @@ public sealed class WindowsFileInspector : IFileInspector
 
     private static bool VerifyTrust(string path)
     {
-        var fileInfo = new WINTRUST_FILE_INFO
+        fixed (char* file = path)
         {
-            cbStruct = (uint)Marshal.SizeOf<WINTRUST_FILE_INFO>(),
-            pcwszFilePath = path,
-        };
-        var fileInfoPtr = Marshal.AllocHGlobal(Marshal.SizeOf<WINTRUST_FILE_INFO>());
-        try
-        {
-            Marshal.StructureToPtr(fileInfo, fileInfoPtr, false);
+            var fileInfo = new WINTRUST_FILE_INFO
+            {
+                cbStruct = (uint)sizeof(WINTRUST_FILE_INFO),
+                pcwszFilePath = file,
+            };
             var data = new WINTRUST_DATA
             {
-                cbStruct = (uint)Marshal.SizeOf<WINTRUST_DATA>(),
+                cbStruct = (uint)sizeof(WINTRUST_DATA),
                 dwUIChoice = WTD_UI_NONE,
                 fdwRevocationChecks = WTD_REVOKE_NONE,
                 dwUnionChoice = WTD_CHOICE_FILE,
-                pFile = fileInfoPtr,
+                pFile = &fileInfo,
                 dwStateAction = WTD_STATEACTION_VERIFY,
             };
             var action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-            var result = WinVerifyTrust(IntPtr.Zero, ref action, ref data);
+            var result = WinVerifyTrust(0, ref action, ref data);
             data.dwStateAction = WTD_STATEACTION_CLOSE;
-            WinVerifyTrust(IntPtr.Zero, ref action, ref data);
+            WinVerifyTrust(0, ref action, ref data);
             return result == 0;
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(fileInfoPtr);
         }
     }
 
@@ -80,11 +74,11 @@ public sealed class WindowsFileInspector : IFileInspector
     private const uint WTD_STATEACTION_VERIFY = 1;
     private const uint WTD_STATEACTION_CLOSE = 2;
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    [StructLayout(LayoutKind.Sequential)]
     private struct WINTRUST_FILE_INFO
     {
         public uint cbStruct;
-        public string pcwszFilePath;
+        public char* pcwszFilePath;
         public IntPtr hFile;
         public IntPtr pgKnownSubject;
     }
@@ -98,7 +92,7 @@ public sealed class WindowsFileInspector : IFileInspector
         public uint dwUIChoice;
         public uint fdwRevocationChecks;
         public uint dwUnionChoice;
-        public IntPtr pFile;
+        public WINTRUST_FILE_INFO* pFile;
         public uint dwStateAction;
         public IntPtr hWVTStateData;
         public IntPtr pwszURLReference;
@@ -107,6 +101,6 @@ public sealed class WindowsFileInspector : IFileInspector
         public IntPtr pSignatureSettings;
     }
 
-    [DllImport("wintrust.dll", CharSet = CharSet.Unicode)]
-    private static extern int WinVerifyTrust(IntPtr hwnd, ref Guid pgActionID, ref WINTRUST_DATA pWVTData);
+    [LibraryImport("wintrust.dll")]
+    private static partial int WinVerifyTrust(nint hwnd, ref Guid pgActionID, ref WINTRUST_DATA pWVTData);
 }

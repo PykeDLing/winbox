@@ -5,6 +5,8 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>$(WinBoxWindowsTfm)</TargetFramework>
     <AssemblyName>winbox</AssemblyName>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishAot>true</PublishAot>
     <RootNamespace>WinBox.Cli</RootNamespace>
   </PropertyGroup>
 
