@@ -464,7 +464,7 @@ internal sealed class LibraryPage : Component
         } with { IsOpen = confirm is not null }).Closed(Answer);
 
         return (FlexColumn(
-                TitleBar("WinBox").Subtitle("预览版").Flex(shrink: 0),
+                TitleBar("WinBox").Flex(shrink: 0),
                 ScrollView(content).Flex(grow: 1, basis: 0),
                 dialog)
             .Backdrop(BackdropKind.Mica)
