@@ -4,5 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <!-- Windows-only projects share one TFM so the App, CLI and Platform layer stay in lockstep. -->
     <WinBoxWindowsTfm>net10.0-windows10.0.26100.0</WinBoxWindowsTfm>
+    <!-- The release version, in every exe's file properties; GitHub releases are tagged v$(Version). -->
+    <Version>0.1.0</Version>
   </PropertyGroup>
 </Project>

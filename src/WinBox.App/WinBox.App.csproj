@@ -13,15 +13,21 @@
     <!--
       WinBox must run without package identity: inside a package context Windows virtualizes the files
       WinBox hands to MXC, and the sandbox cannot be created from them (see AppPaths). The Windows App
-      SDK runtime ships next to the exe, so nothing has to be installed first.
+      SDK runtime ships next to the exe; only the .NET runtime has to be installed.
     -->
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
   </PropertyGroup>
 
+  <!--
+    Published framework-dependent and untrimmed. BoxHost and BoxShim need the installed .NET runtime anyway
+    (they are copied into every box, so they stay small), and trimming switches off two things WinBox relies
+    on: built-in COM (the host guard's shortcut and Task Scheduler scans) and reflection-based JSON (box.json
+    and every other file in JsonFile).
+  -->
   <PropertyGroup Condition="'$(Configuration)' != 'Debug'">
     <PublishReadyToRun>true</PublishReadyToRun>
-    <PublishTrimmed>true</PublishTrimmed>
+    <SelfContained>false</SelfContained>
   </PropertyGroup>
 
   <ItemGroup>
@@ -36,12 +42,23 @@
 
   <!--
     Debug only: the Reactor devtools behind the "Devtools" profile in Properties/launchSettings.json.
-    Release builds leave them out so the trim and AOT analyzers stay quiet.
+    Release builds leave them out.
   -->
   <ItemGroup Condition="'$(Configuration)' == 'Debug'">
     <PackageReference Include="Microsoft.UI.Reactor.Devtools" />
     <RuntimeHostConfigurationOption Include="Reactor.DevtoolsSupport" Value="true" Trim="true" />
   </ItemGroup>
+
+  <!--
+    The app's resource index (WinBox.App.pri, its compiled XAML resources) is only published by the MSIX
+    tooling, which an unpackaged app does without. Left out, WinUI fails to parse XAML at startup (0x802B000A).
+  -->
+  <Target Name="WinBoxPublishProjectPri" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(ProjectPriFullPath)" RelativePath="$(ProjectPriFileName)"
+                             CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
 
   <Import Project="..\..\build\BoxHostPayload.targets" />
 </Project>
