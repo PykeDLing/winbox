@@ -133,7 +133,7 @@ public static class Texts
     {
         var parts = new List<string>();
         if (snapshot.Running.Count > 0)
-            parts.Add($"正在运行：{string.Join("、", snapshot.Running.Select(BoxName))}。退出会先请它们保存并退出，正在进行的上传、下载会中断。");
+            parts.Add($"正在运行：{string.Join("、", snapshot.Running.Select(BoxName))}。退出会先请{Them(snapshot.Running)}保存并退出，正在进行的上传、下载会中断。");
         if (snapshot.Importing > 0)
             parts.Add($"正在添加 {snapshot.Importing} 个安装包，退出会取消。");
         return parts.Count == 0 ? null : string.Join("\n", parts);
@@ -145,8 +145,9 @@ public static class Texts
         var parts = new List<string>();
         if (snapshot.Running.Count > 0)
         {
-            parts.Add("这些盒子会退出：\n" + string.Join("\n", snapshot.Running.Select(b => "· " + BoxName(b))));
-            parts.Add("会先请它们自己保存并退出，10 秒后还没退出的部分会被结束。数据都会保存回盒子，但正在进行的上传、下载会中断。");
+            parts.Add((snapshot.Running.Count == 1 ? "这个盒子会退出：\n" : "这些盒子会退出：\n")
+                + string.Join("\n", snapshot.Running.Select(b => "· " + BoxName(b))));
+            parts.Add($"会先请{Them(snapshot.Running)}自己保存并退出，10 秒后还没退出的部分会被结束。数据都会保存回盒子，但正在进行的上传、下载会中断。");
         }
         if (snapshot.Importing > 0)
             parts.Add($"正在添加的 {snapshot.Importing} 个安装包会取消。");
@@ -154,6 +155,8 @@ public static class Texts
             parts.Add("现在没有正在运行的盒子。");
         return string.Join("\n\n", parts);
     }
+
+    private static string Them(IReadOnlyList<BoxEntry> boxes) => boxes.Count == 1 ? "它" : "它们";
 
     /// <summary>Why WinBox did not open a box's file or folder outside the box.</summary>
     public static string ManualOpenRefused(ManualOpenRefusal refusal, string path) => refusal switch

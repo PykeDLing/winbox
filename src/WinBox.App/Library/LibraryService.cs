@@ -416,7 +416,9 @@ public sealed class LibraryService : IDisposable
             lock (_lock)
                 stopped = _pendingStops.Contains(id);
             // Quit while its package was being registered (WinBox is quitting, say): there is nothing to start.
-            if (!stopped)
+            if (stopped)
+                AppLog.Write($"{id:N} was stopped before it started: not starting it");
+            else
             {
                 var spec = _host.Planner.Plan(box, DateTimeOffset.Now);
                 var record = await _host.PackagedRunner.RunAsync(box, spec, onUpdate: r =>
@@ -472,16 +474,22 @@ public sealed class LibraryService : IDisposable
         // instead would leave an app running that the card says is not.
         lock (_lock)
             _pendingStops.Add(id);
+        AppLog.Write($"stopping {id:N}: its BoxHost is not listening yet, the stop waits for it");
         Notify();
     }
 
     /// <summary>Sends the stops asked for before their BoxHost was listening to those listening now.</summary>
     private void DeliverPendingStops()
     {
-        int delivered;
+        List<Guid> delivered;
         lock (_lock)
-            delivered = _pendingStops.RemoveWhere(PackagedBoxRunner.RequestStop);
-        if (delivered > 0)
+        {
+            delivered = [.. _pendingStops.Where(PackagedBoxRunner.RequestStop)];
+            _pendingStops.ExceptWith(delivered);
+        }
+        foreach (var id in delivered)
+            AppLog.Write($"stopping {id:N}: the waiting stop reached its BoxHost");
+        if (delivered.Count > 0)
             Notify();
     }
 
