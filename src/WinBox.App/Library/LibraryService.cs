@@ -54,12 +54,25 @@ public enum ImportStep
     Registering,
 }
 
+/// <param name="Unfinished">
+/// Something goes wrong if WinBox exits now: an app is running or starting (only WinBox can bring back its window
+/// and report on its run), a stop has not reached its box yet, or an import or a removal is under way.
+/// </param>
+/// <param name="Settled">Nothing is going on at all, down to the host scan that follows each run.</param>
 public sealed record LibrarySnapshot(
     IReadOnlyList<BoxEntry> Boxes,
     IReadOnlyList<BrokenBox> Broken,
     IReadOnlyList<ImportJob> Imports,
     IReadOnlyList<HostReference> Leaks,
-    string? Problem);
+    string? Problem,
+    bool Unfinished,
+    bool Settled)
+{
+    /// <summary>Boxes whose app is up or coming up: what the tray lists, and what quitting WinBox stops.</summary>
+    public IReadOnlyList<BoxEntry> Running => [.. Boxes.Where(b => b.Activity is BoxActivity.Starting or BoxActivity.Running)];
+
+    public int Importing => Imports.Count(j => !j.Failed);
+}
 
 /// <summary>
 /// The library behind the UI: boxes, what each is doing, imports in flight and the host guard. All work
@@ -84,6 +97,12 @@ public sealed class LibraryService : IDisposable
     private string? _problem;
     private readonly CancellationTokenSource _stopping = new();
     private int _started;
+
+    /// <summary>Runs and removals not yet followed to the end, the host scan after each included.</summary>
+    private int _followUps;
+
+    /// <summary>Set by <see cref="QuitAll"/>: nothing new starts.</summary>
+    private bool _quitting;
 
     private static readonly TimeSpan StopWait = TimeSpan.FromSeconds(75);
 
@@ -134,7 +153,10 @@ public sealed class LibraryService : IDisposable
                     _icons.GetValueOrDefault(b.Config.Id),
                     _problems.GetValueOrDefault(b.Config.Id)))
                 .ToList();
-            return new LibrarySnapshot(boxes, [.. _broken], [.. _imports], _leaks, _problem);
+            var unfinished = boxes.Any(b => b.Activity is BoxActivity.Starting or BoxActivity.Running or BoxActivity.Removing)
+                || _pendingStops.Count > 0 || _importCancels.Count > 0;
+            var settled = !unfinished && boxes.All(b => b.Activity == BoxActivity.Idle) && _followUps == 0;
+            return new LibrarySnapshot(boxes, [.. _broken], [.. _imports], _leaks, _problem, unfinished, settled);
         }
     }
 
@@ -258,6 +280,11 @@ public sealed class LibraryService : IDisposable
             var cancel = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
             lock (_lock)
             {
+                if (_quitting)
+                {
+                    cancel.Dispose();
+                    return;
+                }
                 _imports.Add(job);
                 _importCancels[job.Key] = cancel;
             }
@@ -366,11 +393,12 @@ public sealed class LibraryService : IDisposable
         lock (_lock)
         {
             box = _boxes.FirstOrDefault(b => b.Config.Id == id);
-            if (box is null || _activity.GetValueOrDefault(id) != BoxActivity.Idle)
+            if (_quitting || box is null || _activity.GetValueOrDefault(id) != BoxActivity.Idle)
                 return;
             _activity[id] = BoxActivity.Starting;
             _ownRuns.Add(id);
             _problems.Remove(id);
+            _followUps++;
         }
         Notify();
         _ = Task.Run(() => RunAsync(box));
@@ -384,21 +412,24 @@ public sealed class LibraryService : IDisposable
         {
             if (box.Config.Package is not { } package || !_host.Packages.IsRegistered(package))
                 box = await RegisterAsync(box);
-            var spec = _host.Planner.Plan(box, DateTimeOffset.Now);
-            var record = await _host.PackagedRunner.RunAsync(box, spec, onUpdate: r =>
+            bool stopped;
+            lock (_lock)
+                stopped = _pendingStops.Contains(id);
+            // Quit while its package was being registered (WinBox is quitting, say): there is nothing to start.
+            if (!stopped)
             {
-                lock (_lock)
+                var spec = _host.Planner.Plan(box, DateTimeOffset.Now);
+                var record = await _host.PackagedRunner.RunAsync(box, spec, onUpdate: r =>
                 {
-                    if (_pendingStops.Contains(id) && PackagedBoxRunner.RequestStop(id))
-                        _pendingStops.Remove(id);
-                }
-                if (r.State == BoxRunState.Running)
-                    SetActivity(id, current => current == BoxActivity.Starting ? BoxActivity.Running : current);
-                // "Saved" is only said when BoxShim says so; a failed save shows up as a problem once the run ends.
-                else if (r.State == BoxRunState.Closing && r.StateSaved == true)
-                    SetActivity(id, current => current == BoxActivity.Removing ? current : BoxActivity.Closing);
-            });
-            problem = Texts.RunProblem(record);
+                    DeliverPendingStops();
+                    if (r.State == BoxRunState.Running)
+                        SetActivity(id, current => current == BoxActivity.Starting ? BoxActivity.Running : current);
+                    // "Saved" is only said when BoxShim says so; a failed save shows up as a problem once the run ends.
+                    else if (r.State == BoxRunState.Closing && r.StateSaved == true)
+                        SetActivity(id, current => current == BoxActivity.Removing ? current : BoxActivity.Closing);
+                });
+                problem = Texts.RunProblem(record);
+            }
         }
         catch (Exception e)
         {
@@ -415,7 +446,16 @@ public sealed class LibraryService : IDisposable
                 _problems[id] = problem;
         }
         Notify();
-        await ScanHostAsync();
+        try
+        {
+            await ScanHostAsync();
+        }
+        finally
+        {
+            lock (_lock)
+                _followUps--;
+            Notify();
+        }
     }
 
     /// <summary>
@@ -432,6 +472,63 @@ public sealed class LibraryService : IDisposable
         // instead would leave an app running that the card says is not.
         lock (_lock)
             _pendingStops.Add(id);
+        Notify();
+    }
+
+    /// <summary>Sends the stops asked for before their BoxHost was listening to those listening now.</summary>
+    private void DeliverPendingStops()
+    {
+        int delivered;
+        lock (_lock)
+            delivered = _pendingStops.RemoveWhere(PackagedBoxRunner.RequestStop);
+        if (delivered > 0)
+            Notify();
+    }
+
+    /// <summary>
+    /// Winds WinBox's work down before it exits: every app running or starting is asked to quit and every import
+    /// is cancelled, and nothing new starts. <see cref="WaitForQuitAsync"/> says when WinBox may go.
+    /// </summary>
+    public void QuitAll()
+    {
+        List<Guid> running;
+        List<CancellationTokenSource> imports;
+        lock (_lock)
+        {
+            _quitting = true;
+            running = [.. _boxes.Select(b => b.Config.Id)
+                .Where(id => _activity.GetValueOrDefault(id) is BoxActivity.Starting or BoxActivity.Running)];
+            imports = [.. _importCancels.Values];
+        }
+        AppLog.Write($"quitting: stopping {running.Count} boxes, cancelling {imports.Count} imports");
+        foreach (var id in running)
+            Stop(id);
+        // Outside the lock: a cancelled import may finish on this very thread, and it takes the lock.
+        foreach (var cancel in imports)
+            cancel.Cancel();
+    }
+
+    /// <summary>
+    /// Waits after <see cref="QuitAll"/> until WinBox may exit: every stop has reached its box, whose BoxHost then
+    /// quits the app and saves its state on its own; every import has cleaned up after itself (innoextract
+    /// ended, the half-made box deleted); no removal is half done. False if that took longer than
+    /// <paramref name="limit"/>.
+    /// </summary>
+    public async Task<bool> WaitForQuitAsync(TimeSpan limit)
+    {
+        var deadline = DateTimeOffset.Now + limit;
+        while (true)
+        {
+            DeliverPendingStops();
+            lock (_lock)
+            {
+                if (_pendingStops.Count == 0 && _importCancels.Count == 0 && !_activity.ContainsValue(BoxActivity.Removing))
+                    return true;
+            }
+            if (DateTimeOffset.Now >= deadline)
+                return false;
+            await Task.Delay(250);
+        }
     }
 
     /// <summary>Brings back the window of a running app that hid itself, typically in the notification area.</summary>
@@ -467,9 +564,26 @@ public sealed class LibraryService : IDisposable
         {
             box = _boxes.FirstOrDefault(b => b.Config.Id == id);
             wasRunning = _activity.GetValueOrDefault(id) != BoxActivity.Idle;
+            if (box is not null)
+                _followUps++;
         }
         if (box is null)
             return new RemoveOutcome(false, []);
+        try
+        {
+            return await RemoveAsync(box, wasRunning);
+        }
+        finally
+        {
+            lock (_lock)
+                _followUps--;
+            Notify();
+        }
+    }
+
+    private async Task<RemoveOutcome> RemoveAsync(LoadedBox box, bool wasRunning)
+    {
+        var id = box.Config.Id;
         SetActivity(id, _ => BoxActivity.Removing);
         RemoveOutcome outcome;
         try
@@ -558,6 +672,8 @@ public sealed class LibraryService : IDisposable
         {
             while (await timer.WaitForNextTickAsync(_stopping.Token))
             {
+                // A BoxHost that reported nothing new since it started listening still gets its stop.
+                DeliverPendingStops();
                 var changed = false;
                 lock (_lock)
                 {

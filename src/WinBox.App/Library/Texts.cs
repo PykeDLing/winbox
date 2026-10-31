@@ -96,6 +96,65 @@ public static class Texts
 
     public static string Unexpected(Exception e) => $"出错了：{e.Message}";
 
+    /// <summary>A box as dialogs and the tray menu name it: 夸克网盘（添加于 10月20日 23:02）.</summary>
+    public static string BoxName(BoxEntry entry) => $"{entry.Box.Config.Name}（{Added(entry.Box.Config.CreatedAt)}）";
+
+    /// <summary>The notification-area icon's tooltip.</summary>
+    public static string TrayTooltip(LibrarySnapshot snapshot)
+    {
+        var parts = new List<string> { "WinBox" };
+        if (snapshot.Running.Count > 0)
+            parts.Add($"{snapshot.Running.Count} 个盒子在运行");
+        if (snapshot.Importing > 0)
+            parts.Add($"正在添加 {snapshot.Importing} 个安装包");
+        return string.Join(" · ", parts);
+    }
+
+    public static string CloseActionLabel(CloseAction action) => action switch
+    {
+        CloseAction.Tray => "最小化到托盘，盒子继续运行",
+        CloseAction.Quit => "退出 WinBox 并关闭所有盒子",
+        _ => "每次询问",
+    };
+
+    /// <summary>The tray menu's item for the setting, which says what it is now.</summary>
+    public static string CloseActionItem(CloseAction action) => action switch
+    {
+        CloseAction.Tray => "关闭窗口时：最小化到托盘…",
+        CloseAction.Quit => "关闭窗口时：退出 WinBox…",
+        _ => "关闭窗口时：每次询问…",
+    };
+
+    public const string CloseActionNote =
+        "没有盒子在运行时，关闭窗口会直接退出 WinBox。选“退出”时，每次仍会先列出要关闭的盒子，请你确认。";
+
+    /// <summary>What closing the window would cut short, for the question of what closing it should do.</summary>
+    public static string? CloseChoiceNote(LibrarySnapshot snapshot)
+    {
+        var parts = new List<string>();
+        if (snapshot.Running.Count > 0)
+            parts.Add($"正在运行：{string.Join("、", snapshot.Running.Select(BoxName))}。退出会先请它们保存并退出，正在进行的上传、下载会中断。");
+        if (snapshot.Importing > 0)
+            parts.Add($"正在添加 {snapshot.Importing} 个安装包，退出会取消。");
+        return parts.Count == 0 ? null : string.Join("\n", parts);
+    }
+
+    /// <summary>What quitting WinBox ends, for its confirmation.</summary>
+    public static string QuitAllEffects(LibrarySnapshot snapshot)
+    {
+        var parts = new List<string>();
+        if (snapshot.Running.Count > 0)
+        {
+            parts.Add("这些盒子会退出：\n" + string.Join("\n", snapshot.Running.Select(b => "· " + BoxName(b))));
+            parts.Add("会先请它们自己保存并退出，10 秒后还没退出的部分会被结束。数据都会保存回盒子，但正在进行的上传、下载会中断。");
+        }
+        if (snapshot.Importing > 0)
+            parts.Add($"正在添加的 {snapshot.Importing} 个安装包会取消。");
+        if (parts.Count == 0)
+            parts.Add("现在没有正在运行的盒子。");
+        return string.Join("\n\n", parts);
+    }
+
     /// <summary>Why WinBox did not open a box's file or folder outside the box.</summary>
     public static string ManualOpenRefused(ManualOpenRefusal refusal, string path) => refusal switch
     {

@@ -42,32 +42,48 @@ public sealed class HttpDownloader(HttpClient http, TimeSpan? stallTimeout = nul
             return target;
 
         var partial = target + ".partial";
-        await using (var source = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
-        await using (var file = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16, useAsync: true))
-        using (var stall = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        try
         {
-            var buffer = new byte[1 << 16];
-            long received = 0;
-            while (true)
+            await using (var source = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
+            await using (var file = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16, useAsync: true))
+            using (var stall = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
-                stall.CancelAfter(_stallTimeout);
-                int read;
-                try
+                var buffer = new byte[1 << 16];
+                long received = 0;
+                while (true)
                 {
-                    read = await source.ReadAsync(buffer, stall.Token).ConfigureAwait(false);
+                    stall.CancelAfter(_stallTimeout);
+                    int read;
+                    try
+                    {
+                        read = await source.ReadAsync(buffer, stall.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        throw new TimeoutException($"No data received for {_stallTimeout.TotalSeconds:0} seconds.");
+                    }
+                    if (read == 0)
+                        break;
+                    await file.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                    received += read;
+                    progress?.Report(new DownloadProgress(received, total));
                 }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-                {
-                    throw new TimeoutException($"No data received for {_stallTimeout.TotalSeconds:0} seconds.");
-                }
-                if (read == 0)
-                    break;
-                await file.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-                received += read;
-                progress?.Report(new DownloadProgress(received, total));
             }
+            File.Move(partial, target, overwrite: true);
         }
-        File.Move(partial, target, overwrite: true);
+        catch
+        {
+            // Cancelled, stalled or failed: a download that did not finish leaves nothing behind (a full payload
+            // runs to hundreds of MB). The next attempt starts over anyway.
+            try
+            {
+                File.Delete(partial);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+            }
+            throw;
+        }
         return target;
     }
 }

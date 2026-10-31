@@ -6,6 +6,8 @@ namespace WinBox.Platform.Sandbox;
 /// Hears when Windows ends the session (shutdown, restart, sign-out) and holds it up while a handler runs.
 /// Only top-level windows receive WM_QUERYENDSESSION / WM_ENDSESSION, so a hidden one is pumped on a thread
 /// of its own. The shutdown level decides when this process hears of it relative to the others.
+/// A process with windows of its own can instead just ask whether the session is ending
+/// (<see cref="Follow"/>, <see cref="IsEnding"/>).
 /// </summary>
 public static unsafe partial class SessionEnd
 {
@@ -50,6 +52,28 @@ public static unsafe partial class SessionEnd
         }) { IsBackground = true, Name = "session end" }.Start();
         ready.Wait(TimeSpan.FromSeconds(5));
         return window != 0;
+    }
+
+    private static volatile bool s_ending;
+
+    /// <summary>
+    /// Whether Windows is ending the session: from the moment a window passed to <see cref="Follow"/> hears of it
+    /// (WM_QUERYENDSESSION, which comes before anything closes) until the end is called off.
+    /// </summary>
+    public static bool IsEnding => s_ending || GetSystemMetrics(SmShuttingDown) != 0;
+
+    /// <summary>Follows the session end through one of the calling thread's own windows, for <see cref="IsEnding"/>.</summary>
+    public static bool Follow(nint window) =>
+        SetWindowSubclass(window, (nint)(delegate* unmanaged<nint, uint, nint, nint, nuint, nuint, nint>)&FollowProc, 1, 0) != 0;
+
+    [UnmanagedCallersOnly]
+    private static nint FollowProc(nint window, uint message, nint wParam, nint lParam, nuint id, nuint data)
+    {
+        if (message == WmQueryEndSession)
+            s_ending = true;
+        else if (message == WmEndSession && wParam == 0)
+            s_ending = false; // Called off: another app refused, or the user cancelled.
+        return DefSubclassProc(window, message, wParam, lParam);
     }
 
     [UnmanagedCallersOnly]
@@ -131,4 +155,15 @@ public static unsafe partial class SessionEnd
 
     [LibraryImport("user32.dll")]
     private static partial int ShutdownBlockReasonDestroy(nint window);
+
+    private const int SmShuttingDown = 0x2000;
+
+    [LibraryImport("user32.dll")]
+    private static partial int GetSystemMetrics(int index);
+
+    [LibraryImport("comctl32.dll")]
+    private static partial int SetWindowSubclass(nint window, nint subclassProc, nuint id, nuint data);
+
+    [LibraryImport("comctl32.dll")]
+    private static partial nint DefSubclassProc(nint window, uint message, nint wParam, nint lParam);
 }

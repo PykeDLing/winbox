@@ -21,6 +21,9 @@ public sealed class AppPaths
     public string Downloads => Path.Combine(Root, "Downloads");
     public string Logs => Path.Combine(Root, "Logs");
 
+    /// <summary>The user's choices in the app (what closing the window does).</summary>
+    public string Settings => Path.Combine(Root, "settings.json");
+
     public static AppPaths Default()
     {
         var overridden = Environment.GetEnvironmentVariable(DataRootVariable);

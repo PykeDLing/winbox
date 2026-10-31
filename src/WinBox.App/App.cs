@@ -1,12 +1,17 @@
 ﻿using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
+using WinBox.App;
 using WinBox.App.Library;
 using WinBox.App.Views;
+using WinBox.Core;
 using WinBox.Platform;
 
 // WinBox: drop an installer in, the app runs in a box of its own (an MSIX package plus an MXC sandbox) and
 // leaves nothing behind when the box is deleted. The window is the library; all work goes through
 // LibraryService, which the CLI's commands mirror.
+if (SingleInstance.HandOver(AppPaths.Default().Root))
+    return;
+
 ReactorApp.Run<LibraryPage>(new WindowSpec
 {
     Title = "WinBox",
@@ -25,5 +30,6 @@ namespace WinBox.App
     {
         public static WinBoxHost Host { get; } = new();
         public static LibraryService Library { get; } = new(Host);
+        public static SettingsStore Settings { get; } = new(Host.Paths.Settings);
     }
 }

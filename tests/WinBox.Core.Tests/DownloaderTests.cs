@@ -44,6 +44,26 @@ public sealed class DownloaderTests
         }
     }
 
+    [TestMethod]
+    public async Task CancelledDownloadLeavesNoPartialFile()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "winbox-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            using var http = new HttpClient(new Handler(() => new StreamContent(new StallingStream("first bytes"u8.ToArray()))));
+            using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+
+            await Assert.ThrowsAsync<OperationCanceledException>(() =>
+                new HttpDownloader(http, TimeSpan.FromSeconds(30)).DownloadAsync(new Uri("https://example.test/full.exe"), dir, cancellationToken: cancel.Token));
+            Assert.IsEmpty(Directory.GetFiles(dir));
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+    }
+
     private sealed class Handler(Func<HttpContent> content) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>

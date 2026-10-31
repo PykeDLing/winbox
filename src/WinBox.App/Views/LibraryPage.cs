@@ -1,29 +1,54 @@
+using Microsoft.UI;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Reactor.Input;
 using Microsoft.UI.Reactor.Layout;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using WinBox.App.Library;
 using WinBox.Core.Sandbox;
+using WinBox.Platform.Sandbox;
 using static Microsoft.UI.Reactor.Factories;
 
 namespace WinBox.App.Views;
 
-/// <summary>What the confirmation dialog is asking about.</summary>
-internal sealed record Confirmation(ConfirmKind Kind, Guid BoxId, string BoxName, string Added);
+/// <summary>What the dialog is asking about. Only the questions about one box name it.</summary>
+internal sealed record Confirmation(ConfirmKind Kind, Guid BoxId = default, string BoxName = "", string Added = "");
 
 internal enum ConfirmKind
 {
     Quit,
     Remove,
+
+    /// <summary>Quit every box and exit WinBox.</summary>
+    QuitAll,
+
+    /// <summary>The window was closed while boxes run, and no choice has been remembered: tray or quit?</summary>
+    CloseChoice,
+
+    /// <summary>Change what closing the window does (from the tray menu).</summary>
+    CloseSetting,
 }
 
-/// <summary>The window's only page: the boxes, imports in flight, and anything that needs the user's attention.</summary>
+/// <summary>
+/// The window's only page: the boxes, imports in flight, and anything that needs the user's attention. It also
+/// owns WinBox's life: closing the window while boxes run hides WinBox in the notification area (or quits
+/// everything, as the user chose), since a boxed app cannot show a tray icon of its own and WinBox is then the
+/// only way back to its window.
+/// </summary>
 internal sealed class LibraryPage : Component
 {
     private static readonly string[] PickerTypes = [".exe", ".msi", ".msix", ".zip"];
+
+    private static readonly WindowIcon TrayImage = WindowIcon.FromPath(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
+
+    /// <summary>
+    /// How long quitting waits for stops to reach boxes still starting, imports to clean up and removals to finish.
+    /// A removal alone may wait 75 s for its box to stop.
+    /// </summary>
+    private static readonly TimeSpan QuitWait = TimeSpan.FromSeconds(90);
 
     // Segoe Fluent Icons code points.
     private const string AddGlyph = "\uE710";
@@ -45,6 +70,18 @@ internal sealed class LibraryPage : Component
         var (notice, setNotice) = UseState<string?>(null);
         var (fixing, setFixing) = UseState(false);
         var (error, setError) = UseState<string?>(null);
+        var (closeAction, setCloseAction) = UseState(Services.Settings.Current.CloseAction);
+        var (closeChoice, setCloseChoice) = UseState(CloseAction.Tray);
+        var (remember, setRemember) = UseState(false);
+        // Hidden in the notification area, the window closed but WinBox still following its boxes.
+        var (trayed, setTrayed) = UseState(false);
+        var (quitting, setQuitting) = UseState(false);
+        var allowClose = UseRef(false);
+        // What needed the user's attention when WinBox went to the tray: they had seen it already.
+        var seen = UseRef<IReadOnlySet<string>>(new HashSet<string>());
+        // The tray icon and another start of WinBox call back into the latest render.
+        var showLatest = UseRef<Action?>(null);
+        var menuLatest = UseRef<Action?>(null);
         var window = UseWindow();
 
         UseEffect(() =>
@@ -56,9 +93,21 @@ internal sealed class LibraryPage : Component
             return () => library.Changed -= OnChanged;
         });
 
-        void Ask(ConfirmKind kind, BoxEntry entry)
+        UseEffect(() =>
         {
-            var question = new Confirmation(kind, entry.Id, entry.Box.Config.Name, Texts.Added(entry.Box.Config.CreatedAt));
+            // Sign-out and shutdown must never meet a dialog (see the closing guard below).
+            if (window is not null)
+                SessionEnd.Follow(Win32Interop.GetWindowFromWindowId(window.AppWindow.Id));
+            void OnShowRequested() => Later(() => showLatest.Current?.Invoke());
+            SingleInstance.ShowRequested += OnShowRequested;
+            return () => SingleInstance.ShowRequested -= OnShowRequested;
+        });
+
+        void Ask(ConfirmKind kind, BoxEntry entry) =>
+            AskAbout(new Confirmation(kind, entry.Id, entry.Box.Config.Name, Texts.Added(entry.Box.Config.CreatedAt)));
+
+        void AskAbout(Confirmation question)
+        {
             setLastConfirm(question);
             setConfirm(question);
         }
@@ -69,11 +118,186 @@ internal sealed class LibraryPage : Component
             setConfirm(null);
             if (question is null || result != ContentDialogResult.Primary)
                 return;
-            if (question.Kind == ConfirmKind.Quit)
-                library.Stop(question.BoxId);
-            else
-                _ = Guarded(() => RemoveAsync(question));
+            switch (question.Kind)
+            {
+                case ConfirmKind.Quit:
+                    library.Stop(question.BoxId);
+                    break;
+                case ConfirmKind.Remove:
+                    _ = Guarded(() => RemoveAsync(question));
+                    break;
+                case ConfirmKind.QuitAll:
+                    _ = Guarded(QuitAllAsync);
+                    break;
+                case ConfirmKind.CloseChoice:
+                    if (remember)
+                        SaveCloseAction(closeChoice);
+                    // The question named what quitting cuts short: answering it was the confirmation.
+                    if (closeChoice == CloseAction.Quit)
+                        _ = Guarded(QuitAllAsync);
+                    else
+                        HideToTray();
+                    break;
+                case ConfirmKind.CloseSetting:
+                    SaveCloseAction(closeChoice);
+                    break;
+            }
         }
+
+        void SaveCloseAction(CloseAction action)
+        {
+            Services.Settings.Save(Services.Settings.Current with { CloseAction = action });
+            setCloseAction(action);
+            AppLog.Write($"closing the window now does: {action}");
+        }
+
+        // Closing the window with nothing going on exits as ever. With boxes running it may not simply exit: the
+        // boxes would run on with nothing to bring their windows back, report on their runs or quit them. The
+        // guard is synchronous, so it cancels the close and asks, or hides, instead.
+        UseClosingGuard(() =>
+        {
+            // Sign-out and shutdown: BoxHost saves every box by itself, and nothing may hold Windows up.
+            if (allowClose.Current || SessionEnd.IsEnding)
+                return true;
+            if (!library.Snapshot().Unfinished)
+                return true;
+            // A dialog is open already: it is answered first.
+            if (confirm is not null)
+                return false;
+            switch (closeAction)
+            {
+                case CloseAction.Tray:
+                    // After the close has been called off, not from within it.
+                    Later(HideToTray);
+                    break;
+                case CloseAction.Quit:
+                    AskAbout(new Confirmation(ConfirmKind.QuitAll));
+                    break;
+                default:
+                    setCloseChoice(CloseAction.Tray);
+                    setRemember(false);
+                    AskAbout(new Confirmation(ConfirmKind.CloseChoice));
+                    break;
+            }
+            return false;
+        });
+
+        void HideToTray()
+        {
+            seen.Current = Reportable(library.Snapshot(), error);
+            setTrayed(true);
+            window!.Hide();
+            AppLog.Write("hidden in the notification area");
+        }
+
+        void ShowWindow()
+        {
+            if (quitting)
+                return;
+            setTrayed(false);
+            if (window!.AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized } presenter)
+                presenter.Restore();
+            window.Show();
+            window.Activate();
+        }
+
+        void Exit()
+        {
+            allowClose.Current = true;
+            // Never from within a render or a close.
+            Later(() => ReactorApp.Exit());
+        }
+
+        // Quitting asks every box to quit, then waits only until each stop has reached its box: BoxHost then
+        // quits the app and saves on its own. Imports are cancelled and clean up before WinBox goes.
+        async Task QuitAllAsync()
+        {
+            setQuitting(true);
+            window!.Hide();
+            try
+            {
+                library.QuitAll();
+                if (!await library.WaitForQuitAsync(QuitWait))
+                    AppLog.Write("quitting: gave up waiting for boxes still starting, imports or removals");
+            }
+            finally
+            {
+                // The window is gone already: WinBox must not linger out of sight, whatever went wrong.
+                AppLog.Write("exiting");
+                Exit();
+            }
+        }
+
+        // In the tray, once the last box has ended and its run been followed up, WinBox has nothing left to do:
+        // it exits, unless something came up that the user has not seen, and then it shows the window instead.
+        UseEffect(() =>
+        {
+            if (!trayed || quitting || !snapshot.Settled)
+                return;
+            if (Reportable(snapshot, error).Except(seen.Current).Any())
+            {
+                AppLog.Write("nothing left running, but something to report: showing the window");
+                ShowWindow();
+            }
+            else
+            {
+                AppLog.Write("nothing left running and nothing to report: exiting");
+                Exit();
+            }
+        }, snapshot, trayed, error);
+
+        var tray = UseTrayIcon(new TrayIconSpec(TrayImage, Texts.TrayTooltip(snapshot), IsVisible: !quitting));
+        UseEffect(() =>
+        {
+            if (tray is null)
+                return () => { };
+            void OnShow(object? sender, EventArgs e) => showLatest.Current?.Invoke();
+            void OnMenu(object? sender, EventArgs e) => menuLatest.Current?.Invoke();
+            tray.Click += OnShow;
+            tray.DoubleClick += OnShow;
+            tray.RightClick += OnMenu;
+            return () =>
+            {
+                tray.Click -= OnShow;
+                tray.DoubleClick -= OnShow;
+                tray.RightClick -= OnMenu;
+            };
+        }, tray);
+
+        // A tray click proves nothing about who clicked (any process of the user's can fake one): items that
+        // end something only bring up the window and ask there.
+        void FromTray(Action act)
+        {
+            tray?.HideFlyout();
+            act();
+        }
+
+        // A question already open stays: it is answered first.
+        void AskFromTray(Confirmation question, Action? prepare = null)
+        {
+            ShowWindow();
+            if (confirm is not null)
+                return;
+            prepare?.Invoke();
+            AskAbout(question);
+        }
+
+        showLatest.Current = ShowWindow;
+        menuLatest.Current = () => tray?.ShowFlyout(TrayMenu.Build(library.Snapshot(), closeAction, new TrayActions(
+            ShowBox: entry => FromTray(() => library.Show(entry.Id)),
+            QuitBox: entry => FromTray(() => AskFromTray(
+                new Confirmation(ConfirmKind.Quit, entry.Id, entry.Box.Config.Name, Texts.Added(entry.Box.Config.CreatedAt)))),
+            ShowWinBox: () => FromTray(ShowWindow),
+            ChangeCloseAction: () => FromTray(() =>
+                AskFromTray(new Confirmation(ConfirmKind.CloseSetting), prepare: () => setCloseChoice(closeAction))),
+            // With nothing going on, quitting ends nothing: no need to ask.
+            Quit: () => FromTray(() =>
+            {
+                if (library.Snapshot().Unfinished)
+                    AskFromTray(new Confirmation(ConfirmKind.QuitAll));
+                else
+                    Exit();
+            }))));
 
         async Task RemoveAsync(Confirmation question)
         {
@@ -212,7 +436,32 @@ internal sealed class LibraryPage : Component
         var content = (FlexColumn([header, .. banners.Where(b => b is not null).Cast<Element>(), boxes])
             with { RowGap = 16 }).FlexPadding(32, 8, 32, 32);
 
-        var dialog = ConfirmDialog(confirm ?? lastConfirm, isOpen: confirm is not null).Closed(Answer);
+        var asked = confirm ?? lastConfirm;
+        var dialog = (asked?.Kind switch
+        {
+            ConfirmKind.Remove => ConfirmDialog(
+                $"删除“{asked.BoxName}”（{asked.Added}）？",
+                "将删除这个软件的程序、登录状态和全部数据，以及它的应用包，并清除 Windows 记下的使用痕迹。\n\n你自己的文件（例如下载到“下载”文件夹的文件）不受影响。删除后无法恢复。",
+                "删除"),
+            ConfirmKind.QuitAll => ConfirmDialog("退出 WinBox？", Texts.QuitAllEffects(snapshot), "退出"),
+            ConfirmKind.CloseChoice => ChoiceDialog("关闭 WinBox 窗口时",
+                VStack(12,
+                    RadioButtons([Texts.CloseActionLabel(CloseAction.Tray), Texts.CloseActionLabel(CloseAction.Quit)],
+                        closeChoice == CloseAction.Quit ? 1 : 0, i => setCloseChoice(i == 1 ? CloseAction.Quit : CloseAction.Tray)),
+                    Caption(Texts.CloseChoiceNote(snapshot) ?? "").Foreground(Theme.SecondaryText).TextWrapping(),
+                    CheckBox(remember, on => setRemember(on), "记住我的选择（可以在托盘图标的菜单里更改）")),
+                "确定"),
+            ConfirmKind.CloseSetting => ChoiceDialog("关闭 WinBox 窗口时",
+                VStack(12,
+                    RadioButtons([.. Enum.GetValues<CloseAction>().Select(Texts.CloseActionLabel)],
+                        (int)closeChoice, i => setCloseChoice((CloseAction)i)),
+                    Caption(Texts.CloseActionNote).Foreground(Theme.SecondaryText).TextWrapping()),
+                "保存"),
+            _ => ConfirmDialog(
+                $"退出“{asked?.BoxName}”（{asked?.Added}）？",
+                "会先请它自己保存并退出，10 秒后还没退出的部分会被结束。它的数据都会保存回盒子，但还没完成的操作（例如正在进行的传输）会中断。",
+                "退出"),
+        } with { IsOpen = confirm is not null }).Closed(Answer);
 
         return (FlexColumn(
                 TitleBar("WinBox").Subtitle("预览版").Flex(shrink: 0),
@@ -330,24 +579,34 @@ internal sealed class LibraryPage : Component
         return color is { } c ? text.Foreground(c) : text;
     }
 
-    private static ContentDialogElement ConfirmDialog(Confirmation? question, bool isOpen)
-    {
-        var (title, body, action) = question?.Kind switch
+    /// <summary>Runs on the UI thread once the current render, close or other callback is done.</summary>
+    private static void Later(Action act) => ReactorApp.UIDispatcher!.TryEnqueue(() => act());
+
+    /// <summary>Asks before something that cannot be undone. Enter cancels; the action is the button on the left.</summary>
+    private static ContentDialogElement ConfirmDialog(string title, string body, string action) =>
+        ContentDialog(title, Body(body).TextWrapping(), action) with
         {
-            ConfirmKind.Remove => (
-                $"删除“{question.BoxName}”（{question.Added}）？",
-                "将删除这个软件的程序、登录状态和全部数据，以及它的应用包，并清除 Windows 记下的使用痕迹。\n\n你自己的文件（例如下载到“下载”文件夹的文件）不受影响。删除后无法恢复。",
-                "删除"),
-            _ => (
-                $"退出“{question?.BoxName}”（{question?.Added}）？",
-                "会先请它自己保存并退出，10 秒后还没退出的部分会被结束。它的数据都会保存回盒子，但还没完成的操作（例如正在进行的传输）会中断。",
-                "退出"),
-        };
-        return ContentDialog(title, Body(body).TextWrapping(), action) with
-        {
-            IsOpen = isOpen,
             CloseButtonText = "取消",
             DefaultButton = ContentDialogButton.Close,
         };
-    }
+
+    /// <summary>Asks for a choice; its content holds the options, already set to the safe one.</summary>
+    private static ContentDialogElement ChoiceDialog(string title, Element content, string action) =>
+        ContentDialog(title, content, action) with
+        {
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+
+    /// <summary>
+    /// What would need the user's attention: problems on cards, host settings pointing into the boxes, failed
+    /// imports, an error banner. Compared before and after a stay in the tray, to tell what came up meanwhile.
+    /// </summary>
+    private static IReadOnlySet<string> Reportable(LibrarySnapshot snapshot, string? error) =>
+        new HashSet<string>([
+            .. snapshot.Boxes.Where(b => b.Problem is not null).Select(b => $"box {b.Id:N} {b.Problem}"),
+            .. snapshot.Leaks.Select(l => $"leak {l.Location} {l.Path} {l.Name}"),
+            .. snapshot.Imports.Where(j => j.Failed).Select(j => $"import {j.Key:N}"),
+            .. error is null ? [] : new[] { $"error {error}" },
+        ]);
 }
