@@ -35,7 +35,7 @@ void Report(BoxRunRecord record)
     {
         try
         {
-            JsonFile.Write(runPath, record);
+            JsonFile.Write(runPath, record, WinBoxJson.Files.BoxRunRecord);
             return;
         }
         catch (IOException) when (attempt < 5)
@@ -52,7 +52,7 @@ void Report(BoxRunRecord record)
 
 try
 {
-    var request = JsonFile.Read<BoxLaunchRequest>(Path.Combine(hostDir, BoxHostContract.LaunchFile));
+    var request = JsonFile.Read(Path.Combine(hostDir, BoxHostContract.LaunchFile), WinBoxJson.Files.BoxLaunchRequest);
     Log($"launching {request.Spec.Executable}");
     // Created before anything is reported: WinBox treats the box as running only while this event exists,
     // and it goes away with this process however it ends.

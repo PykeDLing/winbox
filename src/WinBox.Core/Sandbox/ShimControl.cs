@@ -53,7 +53,7 @@ public static class ShimControl
     public static void WriteResult(string controlDirectory, ShimResult result)
     {
         Directory.CreateDirectory(controlDirectory);
-        JsonFile.Write(Path.Combine(controlDirectory, ResultFile), result);
+        JsonFile.Write(Path.Combine(controlDirectory, ResultFile), result, WinBoxJson.Files.ShimResult);
     }
 
     public static ShimResult? ReadResult(string controlDirectory)
@@ -61,7 +61,7 @@ public static class ShimControl
         var path = Path.Combine(controlDirectory, ResultFile);
         try
         {
-            return File.Exists(path) ? JsonFile.Read<ShimResult>(path) : null;
+            return File.Exists(path) ? JsonFile.Read(path, WinBoxJson.Files.ShimResult) : null;
         }
         catch (Exception e) when (e is IOException or JsonException)
         {

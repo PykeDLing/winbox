@@ -49,7 +49,7 @@ public sealed class BoxStore
             return new BrokenBox(paths, BrokenReason.MissingConfig, "box.json is missing.");
         try
         {
-            var config = JsonFile.Read<BoxConfig>(paths.ConfigFile);
+            var config = JsonFile.Read(paths.ConfigFile, WinBoxJson.Files.BoxConfig);
             if (config.SchemaVersion > BoxConfig.CurrentSchemaVersion)
                 return new BrokenBox(paths, BrokenReason.UnreadableConfig,
                     $"box.json schema {config.SchemaVersion} is newer than this WinBox understands.");
@@ -65,7 +65,7 @@ public sealed class BoxStore
         }
     }
 
-    public void Save(LoadedBox box) => JsonFile.Write(box.Paths.ConfigFile, box.Config);
+    public void Save(LoadedBox box) => JsonFile.Write(box.Paths.ConfigFile, box.Config, WinBoxJson.Files.BoxConfig);
 
     /// <summary>
     /// Starts an import in Boxes\&lt;id&gt;.box.partial. Nothing becomes visible in the library until
@@ -153,7 +153,7 @@ public sealed class ImportStaging : IDisposable
 
     public LoadedBox Commit(BoxConfig config)
     {
-        JsonFile.Write(Paths.ConfigFile, config);
+        JsonFile.Write(Paths.ConfigFile, config, WinBoxJson.Files.BoxConfig);
         Directory.Move(Paths.Root, _final.Root);
         _committed = true;
         return new LoadedBox(_final, config);

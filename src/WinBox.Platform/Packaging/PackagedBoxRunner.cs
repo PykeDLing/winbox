@@ -27,7 +27,7 @@ public sealed class PackagedBoxRunner(IBoxPackageManager packages, BoxShimDeploy
 
         packages.RefreshHost(box);
         shim.Deploy(box.Paths);
-        JsonFile.Write(BoxHostContract.LaunchPath(box.Paths), new BoxLaunchRequest(box.Config.Id, spec));
+        JsonFile.Write(BoxHostContract.LaunchPath(box.Paths), new BoxLaunchRequest(box.Config.Id, spec), WinBoxJson.Files.BoxLaunchRequest);
         File.Delete(BoxHostContract.RunPath(box.Paths));
         // A request or result left by an earlier run must not act on, or speak for, this one.
         ShimControl.Reset(box.Paths.Control);
@@ -102,7 +102,7 @@ public sealed class PackagedBoxRunner(IBoxPackageManager packages, BoxShimDeploy
         var path = BoxHostContract.RunPath(box.Paths);
         try
         {
-            return File.Exists(path) ? JsonFile.Read<BoxRunRecord>(path) : null;
+            return File.Exists(path) ? JsonFile.Read(path, WinBoxJson.Files.BoxRunRecord) : null;
         }
         catch (Exception e) when (e is IOException or JsonException)
         {

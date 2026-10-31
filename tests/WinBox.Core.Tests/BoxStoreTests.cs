@@ -83,7 +83,7 @@ public sealed class BoxStoreTests
         using var t = new TestBox();
         var box = t.Create(TestBox.Config(package: new BoxPackage("WinBox.Box.0123456789ab", "WinBox.Box.0123456789ab_abc")));
 
-        var config = JsonFile.Read<BoxConfig>(box.Paths.ConfigFile);
+        var config = JsonFile.Read(box.Paths.ConfigFile, WinBoxJson.Files.BoxConfig);
         Assert.AreEqual("WinBox.Box.0123456789ab_abc!App", config.Package!.AppUserModelId);
         Assert.IsFalse(File.ReadAllText(box.Paths.ConfigFile).Contains("blockNetwork"));
         Assert.IsTrue(config.AllowsNetwork);

@@ -19,6 +19,17 @@ public enum CloseAction
 
 public sealed record AppSettings(CloseAction CloseAction = CloseAction.Ask);
 
+/// <summary>Source-generated JSON metadata for settings.json, with WinBox's file settings.</summary>
+[JsonSourceGenerationOptions(
+    WriteIndented = true,
+    PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
+[JsonSerializable(typeof(AppSettings))]
+internal sealed partial class AppJson : JsonSerializerContext
+{
+    public static AppJson Files { get; } = new(JsonFile.NewOptions());
+}
+
 /// <summary>The user's choices, in &lt;data&gt;\settings.json. A file that cannot be read counts as no choices made.</summary>
 public sealed class SettingsStore(string path)
 {
@@ -31,7 +42,7 @@ public sealed class SettingsStore(string path)
         _current = settings;
         try
         {
-            JsonFile.Write(path, settings);
+            JsonFile.Write(path, settings, AppJson.Files.AppSettings);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
@@ -44,7 +55,7 @@ public sealed class SettingsStore(string path)
     {
         try
         {
-            return File.Exists(path) ? JsonFile.Read<AppSettings>(path) : new AppSettings();
+            return File.Exists(path) ? JsonFile.Read(path, AppJson.Files.AppSettings) : new AppSettings();
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException)
         {

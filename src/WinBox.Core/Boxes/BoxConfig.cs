@@ -41,8 +41,10 @@ public sealed record BoxConfig
     [JsonIgnore]
     public bool AllowsNetwork => BlockNetwork != true;
 
+    // Settable, not init: source-generated deserialization fills init properties through the constructor,
+    // which extension data cannot take part in.
     [JsonExtensionData]
-    public Dictionary<string, JsonElement>? Extra { get; init; }
+    public Dictionary<string, JsonElement>? Extra { get; set; }
 }
 
 /// <summary>Where the box's app came from, so WinBox can re-fetch or update it later.</summary>
