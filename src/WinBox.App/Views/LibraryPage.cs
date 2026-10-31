@@ -4,6 +4,7 @@ using Microsoft.UI.Reactor.Input;
 using Microsoft.UI.Reactor.Layout;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using WinBox.App.Library;
 using WinBox.Core.Sandbox;
 using static Microsoft.UI.Reactor.Factories;
@@ -30,6 +31,7 @@ internal sealed class LibraryPage : Component
     private const string StopGlyph = "\uE711";
     private const string WindowGlyph = "\uE8A7";
     private const string DeleteGlyph = "\uE74D";
+    private const string MoreGlyph = "\uE712";
     private const string PackageGlyph = "\uE7B8";
     private const string DropGlyph = "\uE896";
     private const string ErrorGlyph = "\uEA39";
@@ -133,8 +135,11 @@ internal sealed class LibraryPage : Component
 
         // The box's files and folders, opened by WinBox outside the box: a boxed app's own "open" cannot reach
         // Explorer or the programs of this computer.
-        // DropDownButton takes its label as text, so a plain ellipsis rather than a Segoe Fluent glyph.
-        Element More(BoxEntry entry) => DropDownButton("⋯", MenuItems(
+        // An icon button rather than a DropDownButton: its text label and chevron left no room for Show window
+        // and Quit on a running box's card. A button's flyout opens above it by default; below, as a
+        // DropDownButton's does, it keeps the card's status in view.
+        Element More(BoxEntry entry) => Button(Glyph(MoreGlyph))
+            .WithFlyout(MenuItems(FlyoutPlacementMode.BottomEdgeAlignedLeft,
                 MenuSubItem("打开授权文件夹", [.. library.HostPlaces.Select(place => MenuItem(place.Label,
                     () => _ = Guarded(() => OpenOutsideAsync(library.OpenFolderOutsideAsync(entry.Id, place.Path), place.Path))))]),
                 MenuItem("在盒外打开文件…", () => _ = Guarded(() => PickOutsideAsync(entry)))))
@@ -304,7 +309,8 @@ internal sealed class LibraryPage : Component
                 problem,
                 actions)
             with { RowGap = 12 }))
-            .Width(300);
+            // Wide enough for a running box's four buttons (Show window, Quit, More, Delete) at full width.
+            .Width(340);
     }
 
     private static Element EmptyState(Action pick) =>
