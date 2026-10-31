@@ -42,7 +42,9 @@ public sealed class InnoExtractor(string innoextractPath) : IPackageExtractor
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
-        foreach (var arg in new[] { "--silent", "--extract", "--output-dir", destination, installer })
+        // innoextract stops at MAX_PATH unless its output directory carries the \\?\ prefix, and an app's files
+        // can sit 140+ characters deep below the box's staging folder (Quark's do).
+        foreach (var arg in new[] { "--silent", "--extract", "--output-dir", LongPath(destination), installer })
             psi.ArgumentList.Add(arg);
 
         using var process = Process.Start(psi) ?? throw new InvalidOperationException("innoextract did not start.");
@@ -79,5 +81,12 @@ public sealed class InnoExtractor(string innoextractPath) : IPackageExtractor
             .Select(n => n!)
             .ToList();
         return new ExtractionResult(app, skipped);
+    }
+
+    /// <summary>A drive path in the \\?\ form, which Win32 does not limit to MAX_PATH; anything else as it is.</summary>
+    private static string LongPath(string path)
+    {
+        var full = Path.GetFullPath(path);
+        return full.Length > 2 && full[1] == ':' ? @"\\?\" + full : full;
     }
 }
