@@ -65,26 +65,26 @@ dotnet build
 dotnet test
 ```
 
-开发时数据放在仓库下的 `.data\`（相当于安装目录里的 `Data\`）。
-
-图形界面：
+开发时用环境变量 `WINBOX_DATA_ROOT` 把数据放在仓库下的 `.data\`（相当于安装目录里的 `Data\`）：
 
 ```powershell
-.\scripts\app.ps1
+$env:WINBOX_DATA_ROOT = "$PWD\.data"
+dotnet run --project src\WinBox.App                # 图形界面
+dotnet run --project src\WinBox.Cli -- <命令>      # 命令行，和界面使用同一套代码
 ```
 
-命令行（和界面使用同一套代码）：
+命令行的命令：
 
-```powershell
-.\scripts\winbox.ps1 info                  # 沙盒、应用包、本机守卫的状态
-.\scripts\winbox.ps1 import <安装包>        # 导入，并为盒子注册应用包
-.\scripts\winbox.ps1 list
-.\scripts\winbox.ps1 run <盒子 id 或名称>
-.\scripts\winbox.ps1 show <盒子>           # 找回软件被关掉的窗口
-.\scripts\winbox.ps1 stop <盒子>           # 退出：先请软件自己保存并退出，必要时结束进程，数据保存回盒子
-.\scripts\winbox.ps1 remove <盒子>         # 删除盒子及它在系统里的痕迹
-.\scripts\winbox.ps1 guard [--fix]         # 检查（并清除）指向盒子的本机设置，以及已删除盒子留下的 Windows 记录
-```
+| 命令 | 作用 |
+|---|---|
+| `info` | 沙盒、应用包、本机守卫的状态 |
+| `import <安装包>` | 导入，并为盒子注册应用包 |
+| `list` | 列出盒子 |
+| `run <盒子 id 或名称>` | 打开 |
+| `show <盒子>` | 找回软件被关掉的窗口 |
+| `stop <盒子>` | 退出：先请软件自己保存并退出，必要时结束进程，数据保存回盒子 |
+| `remove <盒子>` | 删除盒子及它在系统里的痕迹 |
+| `guard [--fix]` | 检查（并清除）指向盒子的本机设置，以及已删除盒子留下的 Windows 记录 |
 
 发布包：
 
