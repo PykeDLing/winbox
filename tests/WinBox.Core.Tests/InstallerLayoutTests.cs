@@ -200,6 +200,22 @@ public sealed class EntryScoringTests
     }
 
     [TestMethod]
+    public void TheMainProgramAtTheTopBeatsAHelperBelowItThatSharesTheProductName()
+    {
+        // WeChat 4: the helper's version information says "WeChat", which the installer's file name also gives.
+        List<ExecutableCandidate> candidates =
+        [
+            new("Weixin.exe", 3_127_848, new ExecutableInfo(null, "Weixin", "Weixin", null, null), Gui: true),
+            new(@"4.2.0.12\WeixinExt.exe", 251_432, new ExecutableInfo(null, null, "WeChat", null, null), Gui: true, Chromium: true),
+            C("Uninstall.exe", 999_999),
+        ];
+
+        var entry = EntryResolver.Resolve(candidates, names: EntryResolver.NamesOf(Facts("WeChatWin_4.2.0.exe", "微信电脑版")));
+
+        Assert.AreEqual("Weixin.exe", entry!.RelativePath);
+    }
+
+    [TestMethod]
     public void TheInstallersOwnShortcutWins() =>
         Assert.AreEqual(@"bin\app.exe", EntryResolver.Resolve([C("launcher.exe", 999), C(@"bin\app.exe")], hints: [@"bin\app.exe"])!.RelativePath);
 

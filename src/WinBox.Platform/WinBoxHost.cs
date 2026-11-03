@@ -48,7 +48,8 @@ public sealed class WinBoxHost : IDisposable
         }
         extractors.Add(new PortableExtractor());
 
-        Import = new ImportPipeline(Paths, Store, new WindowsFileInspector(), extractors, new HttpDownloader(_http), Recipes);
+        Import = new ImportPipeline(Paths, Store, new WindowsFileInspector(), extractors, new HttpDownloader(_http), Recipes,
+            WindowsAccount.IsFilteredAdministrator());
         Manager = new BoxManager(Paths, Store, Import, Packages, Runner, Guard, Planner);
     }
 

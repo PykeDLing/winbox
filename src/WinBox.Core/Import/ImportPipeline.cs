@@ -29,7 +29,18 @@ public enum ImportFailure
 
     /// <summary>The installer could not be unpacked (damaged, encrypted, or a variant the tools do not know).</summary>
     ExtractionFailed,
+
+    /// <summary>WinBox expects the app not to run in a box, and the caller chose not to add it (see <see cref="ImportConfirmation"/>).</summary>
+    Declined,
 }
+
+/// <summary>
+/// Asked before the box is made when WinBox expects the app not to run in it: <paramref name="blockers"/> are the
+/// reasons, each of severity <see cref="IssueSeverity.NeedsVirtualMachine"/>. True goes on with the import, false
+/// calls it off. Asked before unpacking about what the installer says of itself, after unpacking about what the
+/// files say, and never twice about the same thing.
+/// </summary>
+public delegate Task<bool> ImportConfirmation(IReadOnlyList<CompatibilityIssue> blockers, CancellationToken cancellationToken);
 
 /// <summary>An import failure the UI can explain. <see cref="Detail"/> carries data, not prose.</summary>
 public sealed class ImportException(ImportFailure failure, string? detail = null, Exception? inner = null)
@@ -43,6 +54,10 @@ public sealed class ImportException(ImportFailure failure, string? detail = null
 /// Turns a dropped installer into a box: inspect, resolve stubs through recipes, unpack the payload
 /// without running it, pick the entry executable, and commit the box atomically.
 /// </summary>
+/// <param name="administratorAccount">
+/// WinBox runs as an administrator under User Account Control (with the filtered token): a program that asks for
+/// the highest rights available then asks to be elevated, which it cannot be in a box.
+/// </param>
 public sealed class ImportPipeline(
     AppPaths appPaths,
     BoxStore store,
@@ -50,6 +65,7 @@ public sealed class ImportPipeline(
     IEnumerable<IPackageExtractor> extractors,
     IDownloader downloader,
     IEnumerable<IRecipe> recipes,
+    bool administratorAccount = false,
     TimeProvider? clock = null)
 {
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
@@ -69,10 +85,33 @@ public sealed class ImportPipeline(
         };
     }
 
-    public async Task<LoadedBox> ImportAsync(string droppedFile, IProgress<ImportProgress>? progress = null, CancellationToken cancellationToken = default)
+    /// <param name="confirm">
+    /// Asked when WinBox expects the app not to run in a box; without it the import goes on, and the reasons are
+    /// recorded in the box's issues all the same.
+    /// </param>
+    public async Task<LoadedBox> ImportAsync(
+        string droppedFile,
+        IProgress<ImportProgress>? progress = null,
+        ImportConfirmation? confirm = null,
+        CancellationToken cancellationToken = default)
     {
+        var issues = new List<CompatibilityIssue>();
+
+        // Adds what is new to the box's issues, and asks about whatever of it keeps the app from running.
+        async Task CheckAsync(params IEnumerable<CompatibilityIssue?> found)
+        {
+            var fresh = found.OfType<CompatibilityIssue>().Distinct().Where(f => !issues.Contains(f)).ToList();
+            issues.AddRange(fresh);
+            var blockers = fresh.Where(i => i.Severity == IssueSeverity.NeedsVirtualMachine).ToList();
+            if (blockers.Count > 0 && confirm is not null && !await confirm(blockers, cancellationToken).ConfigureAwait(false))
+                throw new ImportException(ImportFailure.Declined, string.Join(";", blockers.Select(b => b.Code)));
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
         progress?.Report(new ImportProgress(ImportStage.Inspecting));
         var dropped = Inspect(droppedFile);
+        // An app known not to run is told before anything is downloaded or unpacked.
+        await CheckAsync(CompatibilityCheck.Known(dropped)).ConfigureAwait(false);
         var recipe = recipes.FirstOrDefault(r => r.Matches(dropped));
 
         var payload = dropped;
@@ -87,6 +126,7 @@ public sealed class ImportPipeline(
                 throw new ImportException(ImportFailure.UntrustedPayload, payload.Signature?.Subject ?? "unsigned");
             if (payload.Kind != payloadSource.ExpectedKind)
                 throw new ImportException(ImportFailure.UnsupportedFormat, payload.Kind.ToString());
+            await CheckAsync(CompatibilityCheck.Known(payload)).ConfigureAwait(false);
         }
 
         if (payload.Kind == InstallerKind.Msix)
@@ -107,11 +147,14 @@ public sealed class ImportPipeline(
         progress?.Report(new ImportProgress(ImportStage.Extracting));
         var extractRoot = Path.Combine(paths.Root, "_extract");
         var extraction = await extractor.ExtractAsync(payload.Path, payloadKind, extractRoot, cancellationToken).ConfigureAwait(false);
+
+        progress?.Report(new ImportProgress(ImportStage.CheckingCompatibility));
+        // Everything unpacked, before what is not the app goes: a driver the installer would put in System32 counts.
+        var carried = CompatibilityCheck.ScanFiles(extractRoot);
         Directory.Delete(paths.App);
         Directory.Move(extraction.AppDirectory, paths.App);
         Directory.Delete(extractRoot, recursive: true);
 
-        progress?.Report(new ImportProgress(ImportStage.CheckingCompatibility));
         RestorePlaceholderNames(paths.App, recipe?.PlaceholderFileNames ?? new Dictionary<string, string>());
         var candidates = FindExecutables(paths.App);
         IReadOnlyList<string> names = [.. recipe is null ? [] : new[] { recipe.DisplayName }, .. EntryResolver.NamesOf(payload), .. EntryResolver.NamesOf(dropped)];
@@ -119,7 +162,13 @@ public sealed class ImportPipeline(
             ?? throw new ImportException(ImportFailure.NoEntryFound);
         var arguments = recipe?.LaunchArguments ?? (entry.Chromium ? ChromiumApp.LaunchArguments : []);
 
-        var issues = new List<CompatibilityIssue>();
+        var entryPath = Path.Combine(paths.App, entry.RelativePath);
+        await CheckAsync([
+            CompatibilityCheck.CheckEntry(entryPath, administratorAccount),
+            CompatibilityCheck.Known(entry.RelativePath, entry.Info, () => inspector.ReadSignature(entryPath).CommonName),
+            .. carried,
+        ]).ConfigureAwait(false);
+
         var installer = payloadKind is InstallerKind.InnoSetup or InstallerKind.Nsis or InstallerKind.Msi or InstallerKind.Squirrel
             || (payloadKind == InstallerKind.SevenZip && payload.Executable is not null);
         if (installer)

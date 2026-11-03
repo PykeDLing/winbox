@@ -11,6 +11,7 @@ using WinBox.App.Library;
 using WinBox.Core.Sandbox;
 using WinBox.Platform.Sandbox;
 using static Microsoft.UI.Reactor.Factories;
+using IssueSeverity = WinBox.Core.Boxes.IssueSeverity;
 
 namespace WinBox.App.Views;
 
@@ -60,6 +61,7 @@ internal sealed class LibraryPage : Component
     private const string PackageGlyph = "\uE7B8";
     private const string DropGlyph = "\uE896";
     private const string ErrorGlyph = "\uEA39";
+    private const string WarningGlyph = "\uE7BA";
 
     public override Element Render()
     {
@@ -232,7 +234,16 @@ internal sealed class LibraryPage : Component
         // it exits, unless something came up that the user has not seen, and then it shows the window instead.
         UseEffect(() =>
         {
-            if (!trayed || quitting || !snapshot.Settled)
+            if (!trayed || quitting)
+                return;
+            // An import that asks whether to go on waits for the answer: the question cannot wait for the boxes to end.
+            if (snapshot.Imports.Any(j => j.Asking && !seen.Current.Contains(Asked(j))))
+            {
+                AppLog.Write("an import asks whether to go on: showing the window");
+                ShowWindow();
+                return;
+            }
+            if (!snapshot.Settled)
                 return;
             if (Reportable(snapshot, error).Except(seen.Current).Any())
             {
@@ -416,7 +427,8 @@ internal sealed class LibraryPage : Component
         };
         banners.AddRange(snapshot.Imports.Select(job => ImportCard(job,
             dismiss: () => library.DismissImport(job.Key),
-            cancel: () => library.CancelImport(job.Key)).WithKey(job.Key.ToString("N"))));
+            cancel: () => library.CancelImport(job.Key),
+            addAnyway: () => library.AddAnyway(job.Key)).WithKey(job.Key.ToString("N"))));
         banners.AddRange(snapshot.Broken.Select(b =>
             InfoBar("有一个盒子读不出来", $"{b.Paths.Root}（{b.Reason}）。WinBox 不会动它。").Warning().IsClosable(false)
                 .WithKey(b.Paths.Root)));
@@ -483,8 +495,22 @@ internal sealed class LibraryPage : Component
                 DragOperations.Copy));
     }
 
-    private static Element ImportCard(ImportJob job, Action dismiss, Action cancel)
+    private static Element ImportCard(ImportJob job, Action dismiss, Action cancel, Action addAnyway)
     {
+        // WinBox expects the app not to run in a box: the import waits, and not adding it is the default.
+        if (job.Blockers is { } blockers)
+            return Card((FlexRow(
+                    Glyph(WarningGlyph, 24, Theme.SystemCaution),
+                    VStack(4,
+                        BodyStrong(Texts.Blocked(job)),
+                        Body(string.Join("\n", blockers.Select(Texts.Issue))).TextWrapping(),
+                        Caption(Texts.BlockedNote).Foreground(Theme.SecondaryText).TextWrapping()
+                    ).Flex(grow: 1, basis: 0),
+                    HStack(8,
+                        Button("仍然添加", addAnyway).AutomationName($"仍然添加{job.FileName}"),
+                        Button("不添加", cancel).AccentButton().AutomationName($"不添加{job.FileName}")))
+                with { ColumnGap = 16, AlignItems = FlexAlign.Center }));
+
         var status = job.Failed
             ? VStack(2,
                 BodyStrong($"没能添加 {job.FileName}"),
@@ -521,9 +547,10 @@ internal sealed class LibraryPage : Component
             with { ColumnGap = 6, AlignItems = FlexAlign.Center });
 
         var details = string.Join(" · ", new[] { config.Version, config.Publisher }.Where(s => !string.IsNullOrWhiteSpace(s)));
-        var notes = config.Issues.Count == 0
+        var notes = Texts.IssueSummary(config.Issues) is not { } summary
             ? null
-            : Caption($"ⓘ {config.Issues.Count} 条兼容性说明").Foreground(Theme.SecondaryText)
+            : Caption(summary)
+                .Foreground(config.Issues.Any(i => i.Severity != IssueSeverity.Info) ? Theme.SystemCaution : Theme.SecondaryText)
                 .ToolTip(string.Join("\n", config.Issues.Select(i => "· " + Texts.Issue(i))));
         var problem = entry.Problem is null
             ? null
@@ -607,6 +634,9 @@ internal sealed class LibraryPage : Component
             .. snapshot.Boxes.Where(b => b.Problem is not null).Select(b => $"box {b.Id:N} {b.Problem}"),
             .. snapshot.Leaks.Select(l => $"leak {l.Location} {l.Path} {l.Name}"),
             .. snapshot.Imports.Where(j => j.Failed).Select(j => $"import {j.Key:N}"),
+            .. snapshot.Imports.Where(j => j.Asking).Select(Asked),
             .. error is null ? [] : new[] { $"error {error}" },
         ]);
+
+    private static string Asked(ImportJob job) => $"asking {job.Key:N}";
 }

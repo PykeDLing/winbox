@@ -57,11 +57,14 @@ public static partial class EntryResolver
             .FirstOrDefault();
     }
 
+    // A folder down costs more than any hint but the program's own name: apps keep their main program at the top
+    // and helpers below it (WeChat's Weixin.exe over 4.2.0.12\WeixinExt.exe, whose version information says
+    // "WeChat"), and go deeper only when nothing at the top qualifies (DingTalk's build\dist\DingTalk.exe).
     private static int Score(ExecutableCandidate candidate, IReadOnlyList<string> names) =>
         NameScore(candidate, names)
         + (candidate.Gui switch { true => 30, false => -30, null => 0 })
-        + (candidate.Chromium ? 25 : 0)
-        - 20 * Depth(candidate.RelativePath);
+        + (candidate.Chromium ? 15 : 0)
+        - 50 * Depth(candidate.RelativePath);
 
     /// <summary>How well the program's file name, or the product named in its version information, matches the app's names.</summary>
     private static int NameScore(ExecutableCandidate candidate, IReadOnlyList<string> names)
@@ -80,7 +83,7 @@ public static partial class EntryResolver
         var product = Normalize(candidate.Info?.ProductName ?? "");
         var description = Normalize(candidate.Info?.FileDescription ?? "");
         if (names.Any(n => n == product || n == description))
-            score = Math.Max(score, 40);
+            score = Math.Max(score, 25);
         return score;
     }
 
@@ -129,7 +132,7 @@ public static partial class EntryResolver
     private static partial Regex NoiseToken();
 
     /// <summary>Lower case, letters and digits only (any script), so "Visual Studio Code" and "visualstudiocode" compare equal.</summary>
-    private static string Normalize(string text)
+    internal static string Normalize(string text)
     {
         var builder = new StringBuilder(text.Length);
         foreach (var c in text)

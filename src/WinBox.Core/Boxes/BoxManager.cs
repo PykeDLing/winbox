@@ -67,10 +67,16 @@ public sealed class BoxManager(
     /// Mode off, say) is kept all the same: it is in the library, and opening it tries again, so trying the import
     /// again never makes a second box.
     /// </summary>
+    /// <param name="confirm">Asked when WinBox expects the app not to run in a box (see <see cref="ImportConfirmation"/>).</param>
     /// <param name="register">False leaves the package to the first run (the CLI's import --no-package).</param>
-    public async Task<ImportedBox> ImportAsync(string file, IProgress<ImportProgress>? progress = null, CancellationToken cancellationToken = default, bool register = true)
+    public async Task<ImportedBox> ImportAsync(
+        string file,
+        IProgress<ImportProgress>? progress = null,
+        ImportConfirmation? confirm = null,
+        bool register = true,
+        CancellationToken cancellationToken = default)
     {
-        var box = await import.ImportAsync(file, progress, cancellationToken).ConfigureAwait(false);
+        var box = await import.ImportAsync(file, progress, confirm, cancellationToken).ConfigureAwait(false);
         if (!register)
             return new ImportedBox(box, null);
         if (packages.GetUnavailableReason() is { } reason)

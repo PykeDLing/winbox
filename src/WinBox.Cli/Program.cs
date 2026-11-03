@@ -17,8 +17,8 @@ try
     {
         ["info"] => Info(),
         ["list"] => List(),
-        ["import", var file] => await Import(file, register: true),
-        ["import", var file, "--no-package"] => await Import(file, register: false),
+        ["import", var file, .. var flags] when flags.All(f => f is "--no-package" or "--anyway") =>
+            await Import(file, register: !flags.Contains("--no-package"), anyway: flags.Contains("--anyway")),
         ["package", var box] => await Package(box),
         ["run", var box, ..] => await Run(box, args.Skip(2).ToArray()),
         ["stop", var box] => Stop(box),
@@ -51,9 +51,10 @@ int Usage()
         usage: winbox <command>
           info                     sandbox and package support, data root, tools
           list                     boxes in the library
-          import <installer> [--no-package]
+          import <installer> [--no-package] [--anyway]
                                    create a box from an installer (stubs are resolved through recipes)
-                                   and register its package
+                                   and register its package. An app WinBox expects not to run in a box
+                                   (measured, or asking for administrator rights) is only imported with --anyway
           package <id|name>        (re)register the box's MSIX package
           run <id|name> [options]  launch a box inside its package. Options ({data} = the box's Data dir):
                 --seconds N   stop it after N seconds
@@ -61,6 +62,7 @@ int Usage()
                 --env K=V     set an environment variable inside the sandbox
                 --arg A       append a launch argument
                 --rw PATH     also grant read-write on PATH (environment variables expanded)
+                --ro PATH     DIAGNOSTICS ONLY: also grant read-only on PATH (measured: a read-only C:\ covers the whole drive)
                 --loopback on let host tools reach the app's 127.0.0.1 ports (e.g. DevTools)
                 --capture allow  DIAGNOSTICS ONLY: allow and record would-be-denied accesses
                 --direct on   DIAGNOSTICS ONLY: skip the package; AppData/HKCU writes are then denied
@@ -121,8 +123,17 @@ int List()
     return 0;
 }
 
-async Task<int> Import(string file, bool register)
+async Task<int> Import(string file, bool register, bool anyway)
 {
+    Task<bool> Confirm(IReadOnlyList<CompatibilityIssue> blockers, CancellationToken cancellationToken)
+    {
+        foreach (var blocker in blockers)
+            Console.WriteLine($"expected not to run in a box: {blocker.Code} {blocker.Detail}");
+        if (!anyway)
+            Console.Error.WriteLine("not imported; pass --anyway to import it all the same");
+        return Task.FromResult(anyway);
+    }
+
     var lastStage = (ImportStage?)null;
     var lastPercent = -1;
     var progress = new Progress<ImportProgress>(p =>
@@ -140,7 +151,7 @@ async Task<int> Import(string file, bool register)
             lastPercent = percent;
         }
     });
-    var (box, registrationError) = await host.Manager.ImportAsync(file, progress, register: register);
+    var (box, registrationError) = await host.Manager.ImportAsync(file, progress, Confirm, register);
     Console.WriteLine($"imported {box.Config.Name} {box.Config.Version} -> {box.Paths.Root}");
     Console.WriteLine($"entry: {box.Config.Entry}  args: {string.Join(' ', box.Config.LaunchArguments)}");
     foreach (var issue in box.Config.Issues)
@@ -171,6 +182,7 @@ async Task<int> Run(string key, string[] options)
     string? containerName = null;
     string? executable = null;
     var extraWritable = new List<string>();
+    var extraReadable = new List<string>();
     for (var i = 0; i + 1 < options.Length; i += 2)
     {
         var value = options[i + 1].Replace(LaunchPlanner.DataPlaceholder, box.Paths.Data, StringComparison.Ordinal);
@@ -185,6 +197,7 @@ async Task<int> Run(string key, string[] options)
             case "--container": containerName = value; break;
             case "--exe": executable = value; break;
             case "--rw": extraWritable.Add(Environment.ExpandEnvironmentVariables(value)); break;
+            case "--ro": extraReadable.Add(Environment.ExpandEnvironmentVariables(value)); break;
             case "--env" when value.IndexOf('=') is > 0 and var eq: environment[value[..eq]] = value[(eq + 1)..]; break;
             default: throw new ArgumentException($"unknown run option {options[i]}");
         }
@@ -201,6 +214,7 @@ async Task<int> Run(string key, string[] options)
         AllowHostLoopbackIngress = loopback,
         PermissiveCapture = permissive,
         ReadWritePaths = [.. planned.ReadWritePaths, .. extraWritable],
+        ReadOnlyPaths = [.. planned.ReadOnlyPaths, .. extraReadable],
         ContainerName = containerName ?? planned.ContainerName,
     };
     if (permissive)

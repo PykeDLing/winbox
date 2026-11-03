@@ -38,8 +38,37 @@ public static class Texts
         IssueCode.FilesOutsideAppSkipped => "安装包里要装到程序目录以外的文件没有放进盒子",
         IssueCode.ShellExtensionUnavailable => "右键菜单等资源管理器扩展不可用",
         IssueCode.InnerSandboxDisabled => "基于 Chromium 的软件：它自带的沙盒已关闭，由 WinBox 的沙盒负责隔离",
+        IssueCode.KnownIncompatible => issue.Detail switch
+        {
+            "wechat" => "实测微信不能在盒子里运行：它要读取本机的文件夹设置和磁盘设备，沙盒不允许，启动后会提示“文件保存位置无法使用”并退出",
+            "discord" => "实测 Discord 不能在盒子里运行：启动后约 4 秒就自己退出",
+            _ => "实测这个软件不能在盒子里运行",
+        },
+        IssueCode.NeedsAdministrator => issue.Detail == CompatibilityCheck.HighestAvailable
+            ? "你的账户是管理员账户，它每次启动都会要管理员权限；盒子里的软件拿不到管理员权限，所以打不开"
+            : "它每次启动都要管理员权限，盒子里的软件拿不到管理员权限，所以打不开",
+        IssueCode.DriverUnavailable => $"带有驱动程序（{Files(issue.Detail)}）：盒子里不能安装驱动，靠它的功能用不了",
+        IssueCode.ServiceUnavailable => $"带有 Windows 服务（{Files(issue.Detail)}）：盒子里不能安装服务，靠它的功能用不了",
         _ => issue.Code.ToString(),
     };
+
+    /// <summary>The card's one-line summary of a box's issues, or null when it has none.</summary>
+    public static string? IssueSummary(IReadOnlyList<CompatibilityIssue> issues) =>
+        issues.Count == 0 ? null
+        : issues.Any(i => i.Severity == IssueSeverity.NeedsVirtualMachine) ? "⚠ 可能无法在盒子里运行"
+        : issues.Any(i => i.Severity == IssueSeverity.Limited) ? "⚠ 有些功能在盒子里用不了"
+        : $"ⓘ {issues.Count} 条兼容性说明";
+
+    public static string Blocked(ImportJob job) => $"{job.FileName} 可能无法在盒子里运行";
+
+    public const string BlockedNote = "仍然添加的话，盒子会照常建好。打不开时删除盒子即可，电脑上不会留下痕迹。";
+
+    /// <summary>File names stored as "a.sys;b.sys": the first three, then how many more.</summary>
+    private static string Files(string? detail)
+    {
+        var names = (detail ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries);
+        return names.Length <= 3 ? string.Join("、", names) : $"{string.Join("、", names.Take(3))} 等 {names.Length} 个";
+    }
 
     public const string DownloadStalled = "下载中断了：30 秒没有收到任何数据。请检查网络后重新添加";
     public const string NetworkTimeout = "连接下载服务器超时。请检查网络后重新添加";
@@ -59,6 +88,7 @@ public static class Texts
         ImportFailure.NoEntryFound => "安装包里没有找到可以启动的程序",
         ImportFailure.PackagedApp => "这是 MSIX 应用包，Windows 会自己隔离安装它，不需要放进盒子",
         ImportFailure.ExtractionFailed => $"没能解开这个安装包（可能已损坏或加了密）{Detail(detail)}",
+        ImportFailure.Declined => "没有添加：它可能无法在盒子里运行",
         _ => failure.ToString(),
     };
 

@@ -38,9 +38,15 @@ public sealed record HostPlace(string Label, string Path);
 /// <summary>How a removal went: whether the box is gone, and what of it could not be cleaned up.</summary>
 public sealed record RemoveResult(bool Removed, IReadOnlyList<string> Leftovers);
 
-public sealed record ImportJob(Guid Key, string FileName, ImportStep Step, DownloadProgress? Download, string? Error)
+/// <param name="Blockers">
+/// Why WinBox expects the app not to run in a box, while the import waits for the user to add it all the same
+/// (<see cref="LibraryService.AddAnyway"/>) or call it off (<see cref="LibraryService.CancelImport"/>).
+/// </param>
+public sealed record ImportJob(Guid Key, string FileName, ImportStep Step, DownloadProgress? Download, string? Error,
+    IReadOnlyList<CompatibilityIssue>? Blockers = null)
 {
     public bool Failed => Error is not null;
+    public bool Asking => Blockers is not null;
 }
 
 /// <summary>Import progress as the library shows it: the pipeline's stages plus registering the box's package.</summary>
@@ -91,6 +97,7 @@ public sealed class LibraryService : IDisposable
     private readonly Dictionary<Guid, string> _icons = [];
     private readonly List<ImportJob> _imports = [];
     private readonly Dictionary<Guid, CancellationTokenSource> _importCancels = [];
+    private readonly Dictionary<Guid, TaskCompletionSource> _importAnswers = [];
     private List<LoadedBox> _boxes = [];
     private List<BrokenBox> _broken = [];
     private IReadOnlyList<HostReference> _leaks = [];
@@ -298,6 +305,13 @@ public sealed class LibraryService : IDisposable
             _importCancels.GetValueOrDefault(key)?.Cancel();
     }
 
+    /// <summary>Goes on with an import that waits because WinBox expects the app not to run in a box.</summary>
+    public void AddAnyway(Guid key)
+    {
+        lock (_lock)
+            _importAnswers.GetValueOrDefault(key)?.TrySetResult();
+    }
+
     public void DismissImport(Guid key)
     {
         lock (_lock)
@@ -318,10 +332,37 @@ public sealed class LibraryService : IDisposable
             Notify();
         }
 
+        // The card asks and the import waits. Not adding it cancels the import, as its Cancel button would.
+        async Task<bool> Confirm(IReadOnlyList<CompatibilityIssue> blockers, CancellationToken token)
+        {
+            var answer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (_lock)
+                _importAnswers[job.Key] = answer;
+            AppLog.Write($"importing {job.FileName}: asking whether to add it, expected not to run ({string.Join(", ", blockers.Select(b => $"{b.Code} {b.Detail}"))})");
+            Update(j => j with { Blockers = blockers });
+            try
+            {
+                await answer.Task.WaitAsync(token);
+                AppLog.Write($"importing {job.FileName}: added all the same");
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                AppLog.Write($"importing {job.FileName}: not added");
+                throw;
+            }
+            finally
+            {
+                lock (_lock)
+                    _importAnswers.Remove(job.Key);
+                Update(j => j with { Blockers = null });
+            }
+        }
+
         try
         {
             var progress = new InlineProgress<ImportProgress>(p => Update(j => j with { Step = StepOf(p.Stage), Download = p.Download }));
-            var (box, registrationError) = await _host.Manager.ImportAsync(file, progress, cancel.Token);
+            var (box, registrationError) = await _host.Manager.ImportAsync(file, progress, Confirm, cancellationToken: cancel.Token);
             lock (_lock)
             {
                 _imports.RemoveAll(j => j.Key == job.Key);

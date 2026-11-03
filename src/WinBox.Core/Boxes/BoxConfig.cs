@@ -101,6 +101,21 @@ public enum IssueCode
 
     /// <summary>The app is built on Chromium (Electron, CEF); its own sandbox is turned off and the box's sandbox isolates it.</summary>
     InnerSandboxDisabled,
+
+    /// <summary>The app was measured not to run in a box. <see cref="CompatibilityIssue.Detail"/> names it (see <see cref="Import.CompatibilityCheck"/>).</summary>
+    KnownIncompatible,
+
+    /// <summary>
+    /// The entry program's manifest asks for administrator rights on start, which a box never has; the detail is the
+    /// level it asks for (requireAdministrator, or highestAvailable on an administrator account).
+    /// </summary>
+    NeedsAdministrator,
+
+    /// <summary>The installer carries kernel drivers (their file names in the detail); a box cannot load drivers.</summary>
+    DriverUnavailable,
+
+    /// <summary>The installer carries Windows service programs (their file names in the detail); a box installs no services.</summary>
+    ServiceUnavailable,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<InstallerKind>))]
