@@ -56,7 +56,14 @@ try
     Log($"launching {request.Spec.Executable}");
     // Created before anything is reported: WinBox treats the box as running only while this event exists,
     // and it goes away with this process however it ends.
-    using var stop = new EventWaitHandle(false, EventResetMode.ManualReset, BoxHostContract.StopEventName(request.BoxId));
+    using var stop = new EventWaitHandle(false, EventResetMode.ManualReset, BoxHostContract.StopEventName(request.BoxId), out var createdNew);
+    if (!createdNew)
+    {
+        // Another BoxHost runs this box. A second sandbox would share the box's saved state with the first, so
+        // this one leaves without starting anything, and without touching the files that speak for the other.
+        Log("another BoxHost is running this box; not starting a second sandbox");
+        return 3;
+    }
     Report(new BoxRunRecord { State = BoxRunState.Starting, HostProcessId = hostPid, StartedAt = startedAt });
 
     using var app = await new MxcSandboxRunner().LaunchAsync(request.Spec);

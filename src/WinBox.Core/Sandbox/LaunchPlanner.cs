@@ -25,8 +25,8 @@ public sealed class LaunchPlanner
     /// </param>
     /// <param name="localAppData">%LOCALAPPDATA%; package private storage lives under its Packages folder.</param>
     /// <param name="winBoxRoots">
-    /// WinBox's own directories (install directory, data root). Whatever of them a granted area would
-    /// expose is denied, apart from the box's own items: WinBox runs files from there outside the sandbox.
+    /// WinBox's own directories (install directory, data root). No granted area may cover any part of them,
+    /// apart from the box's own items: WinBox runs files from there outside the sandbox.
     /// </param>
     public LaunchPlanner(Func<HostAreas> areas, string localAppData, IReadOnlyList<string>? winBoxRoots = null)
     {
@@ -66,7 +66,8 @@ public sealed class LaunchPlanner
         List<string> boxGrants = [.. paths.ReadOnlyItems, .. paths.WritableItems, .. packageStorage];
 
         var areas = _areas();
-        List<string> userAreas = [.. areas.PersonalFolders, .. areas.DataDrives.SelectMany(d => DriveGrants(d, areas.InstalledPrograms))];
+        var userAreas = AroundWinBox([.. areas.PersonalFolders, .. areas.DataDrives.SelectMany(d => DriveGrants(d, areas.InstalledPrograms))]);
+        List<string> granted = [.. boxGrants, .. userAreas];
 
         return new LaunchSpec
         {
@@ -74,12 +75,10 @@ public sealed class LaunchPlanner
             Arguments = shim.ToArgs(),
             WorkingDirectory = Path.GetDirectoryName(exe)!,
             ReadOnlyPaths = [],
-            ReadWritePaths = [.. boxGrants, .. userAreas],
-            // The box itself may sit inside a granted area (development data under Desktop); its private
-            // items must stay out of reach regardless, and so must the rest of WinBox and the programs
-            // installed on a granted drive.
+            ReadWritePaths = granted,
+            // The box's private items are never granted; denying them as well keeps them out of reach should a
+            // grant ever cover them. The programs installed on a granted drive are denied.
             DeniedPaths = paths.PrivateItems
-                .Concat(ExposedWinBoxEntries(boxGrants, userAreas))
                 .Concat(ProtectedPrograms(areas, [.. boxGrants, .. userAreas]))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList(),
@@ -87,6 +86,15 @@ public sealed class LaunchPlanner
             {
                 ["TEMP"] = paths.Tmp,
                 ["TMP"] = paths.Tmp,
+                // The real Roaming AppData is out of the sandbox's reach, and Windows does not move it for a
+                // sandboxed package (measured: a folder made there with Roaming granted landed in the real one), so
+                // apps that keep their settings there (Electron and Qt apps, most others) could not start. Windows
+                // works the user's folders out from USERPROFILE as the process sees it, so the app gets a profile
+                // of its own in the box: Roaming AppData is the box's, the personal folders link to the real ones.
+                ["USERPROFILE"] = paths.Profile,
+                ["HOMEDRIVE"] = Path.GetPathRoot(paths.Profile)!.TrimEnd(Path.DirectorySeparatorChar),
+                ["HOMEPATH"] = paths.Profile[Path.GetPathRoot(paths.Profile)!.TrimEnd(Path.DirectorySeparatorChar).Length..],
+                ["APPDATA"] = paths.Roaming,
             },
             AllowNetwork = box.Config.AllowsNetwork,
             DenialsOutputPath = Path.Combine(paths.Reports, $"denials-{now:yyyyMMdd-HHmmss}"),
@@ -94,40 +102,56 @@ public sealed class LaunchPlanner
     }
 
     /// <summary>
-    /// Everything under WinBox's roots that a granted area exposes, except the box's own grants: other
-    /// boxes, downloads, logs, WinBox's binaries. A directory holding a grant is split into its entries
-    /// instead of being denied whole, because a denial would take the grant back. Entries created after the
-    /// box starts (another box imported meanwhile) are only covered from its next run.
+    /// The user's areas with WinBox's own directories cut out. WinBox runs files from its install directory and
+    /// data root outside the sandbox, so the app may not write anywhere in them: not to what is there (other
+    /// boxes, WinBox's binaries), and not new files either, such as a DLL next to WinBox.exe that WinBox would
+    /// load on its next start. Denying the entries of a granted folder leaves the folder open to new ones, so no
+    /// grant may cover WinBox at all: an area holding a WinBox directory is replaced by its entries, the ones
+    /// leading to WinBox split again in turn, and WinBox's directories themselves left out. A drive root stays,
+    /// since MXC grants it to the files at the root alone (see <see cref="DriveGrants"/>). What the user adds to a
+    /// split folder while the box runs is covered from its next run.
     /// </summary>
-    private List<string> ExposedWinBoxEntries(IReadOnlyList<string> boxGrants, IReadOnlyList<string> userAreas)
+    private List<string> AroundWinBox(IReadOnlyList<string> areas)
     {
-        var grants = boxGrants.Concat(userAreas).Select(Normalize).ToList();
-        var own = boxGrants.Select(Normalize).ToList();
-        var denied = new List<string>();
+        var roots = _winBoxRoots.Where(Directory.Exists).Select(Normalize).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (roots.Count == 0)
+            return [.. areas];
 
-        void Visit(string path)
+        bool InWinBox(string path) => roots.Any(r => IsSameOrUnder(path, r));
+        bool HoldsWinBox(string path) => roots.Any(r => IsSameOrUnder(r, path));
+
+        var grants = new List<string>();
+        void Split(string directory)
         {
-            if (own.Any(g => IsSameOrUnder(path, g)))
-                return;
-            if (!grants.Any(g => IsSameOrUnder(g, path)))
-            {
-                denied.Add(path);
-                return;
-            }
-            IEnumerable<string> entries;
-            try { entries = Directory.EnumerateFileSystemEntries(path).ToList(); }
+            List<string> entries;
+            try { entries = Directory.EnumerateFileSystemEntries(directory).ToList(); }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return; }
             foreach (var entry in entries)
-                Visit(entry);
+            {
+                var path = Normalize(entry);
+                if (InWinBox(path))
+                    continue;
+                if (HoldsWinBox(path))
+                    Split(path);
+                else
+                    grants.Add(entry);
+            }
         }
 
-        foreach (var root in _winBoxRoots.Select(Normalize).Where(Directory.Exists))
+        foreach (var area in areas)
         {
-            if (userAreas.Any(a => IsSameOrUnder(root, Normalize(a))))
-                Visit(root);
+            var path = Normalize(area);
+            if (InWinBox(path))
+                continue;
+            if (HoldsWinBox(path) && !IsDriveRoot(path))
+                Split(path);
+            else
+                grants.Add(area);
         }
-        return denied;
+        return grants;
     }
+
+    private static bool IsDriveRoot(string path) => string.Equals(Path.GetPathRoot(path), path, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// What granting a whole drive takes: MXC applies a grant of a drive root ("D:\") to the files at the root

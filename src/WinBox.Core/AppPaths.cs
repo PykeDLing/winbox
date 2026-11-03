@@ -21,6 +21,9 @@ public sealed class AppPaths
     public string Downloads => Path.Combine(Root, "Downloads");
     public string Logs => Path.Combine(Root, "Logs");
 
+    /// <summary>One lock file per box while a process starts, registers or removes it (see <see cref="Boxes.BoxLock"/>).</summary>
+    public string Locks => Path.Combine(Root, "Locks");
+
     /// <summary>The user's choices in the app (what closing the window does).</summary>
     public string Settings => Path.Combine(Root, "settings.json");
 
@@ -38,5 +41,6 @@ public sealed class AppPaths
         Directory.CreateDirectory(Boxes);
         Directory.CreateDirectory(Downloads);
         Directory.CreateDirectory(Logs);
+        Directory.CreateDirectory(Locks);
     }
 }

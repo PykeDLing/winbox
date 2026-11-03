@@ -54,4 +54,5 @@
   </Target>
 
   <Import Project="..\..\build\BoxHostPayload.targets" />
+  <Import Project="..\..\build\UnpackTools.targets" />
 </Project>

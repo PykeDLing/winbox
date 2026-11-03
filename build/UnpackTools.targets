@@ -1,0 +1,28 @@
+<Project>
+  <!--
+    Puts the unpacking tools next to the importing executable, in tools\, on build and on publish:
+      tools\7zip\     7z.exe, 7z.dll: NSIS installers, MSI cabinets, 7z, zip, RAR and other archives;
+      tools\innounp\  innounp.exe: Inno Setup installers.
+    They come from .tools\, which scripts/get-tools.ps1 fills. Without them WinBox still runs, and imports only
+    single-file portable programs.
+  -->
+  <PropertyGroup>
+    <_WinBoxToolsDir>$(MSBuildThisFileDirectory)..\.tools\</_WinBoxToolsDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <_WinBoxUnpackTool Include="$(_WinBoxToolsDir)7zip\7z.exe;$(_WinBoxToolsDir)7zip\7z.dll;$(_WinBoxToolsDir)7zip\License.txt" Folder="7zip" />
+    <_WinBoxUnpackTool Include="$(_WinBoxToolsDir)innounp\innounp.exe;$(_WinBoxToolsDir)innounp\LICENSE.txt" Folder="innounp" />
+  </ItemGroup>
+
+  <Target Name="WinBoxCopyUnpackTools" AfterTargets="Build">
+    <Copy SourceFiles="@(_WinBoxUnpackTool)" Condition="Exists('%(Identity)')"
+          DestinationFiles="@(_WinBoxUnpackTool->'$(OutDir)tools\%(Folder)\%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="WinBoxPublishUnpackTools" AfterTargets="Publish">
+    <Copy SourceFiles="@(_WinBoxUnpackTool)" Condition="Exists('%(Identity)')"
+          DestinationFiles="@(_WinBoxUnpackTool->'$(PublishDir)tools\%(Folder)\%(Filename)%(Extension)')" />
+  </Target>
+</Project>

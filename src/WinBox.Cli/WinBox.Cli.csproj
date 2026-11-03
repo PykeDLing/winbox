@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <!-- Developer harness: drives the same Core/Platform code as the App without UI. -->
   <PropertyGroup>
@@ -16,5 +16,6 @@
   </ItemGroup>
 
   <Import Project="..\..\build\BoxHostPayload.targets" />
+  <Import Project="..\..\build\UnpackTools.targets" />
 
 </Project>

@@ -40,7 +40,7 @@ internal enum ConfirmKind
 /// </summary>
 internal sealed class LibraryPage : Component
 {
-    private static readonly string[] PickerTypes = [".exe", ".msi", ".msix", ".zip"];
+    private static readonly string[] PickerTypes = [".exe", ".msi", ".zip", ".7z", ".rar"];
 
     private static readonly WindowIcon TrayImage = WindowIcon.FromPath(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
 

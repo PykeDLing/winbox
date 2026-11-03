@@ -6,9 +6,10 @@ namespace WinBox.Core.Tests;
 /// <summary>A throwaway data root with helpers for building boxes.</summary>
 internal sealed class TestBox : IDisposable
 {
-    public TestBox()
+    /// <param name="root">The data root; a new folder under the temp directory by default.</param>
+    public TestBox(string? root = null)
     {
-        Root = Path.Combine(Path.GetTempPath(), "winbox-tests", Guid.NewGuid().ToString("N"));
+        Root = root ?? Path.Combine(Path.GetTempPath(), "winbox-tests", Guid.NewGuid().ToString("N"));
         Paths = new AppPaths(Root);
         Store = new BoxStore(Paths);
     }

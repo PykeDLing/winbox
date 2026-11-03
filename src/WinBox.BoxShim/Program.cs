@@ -12,7 +12,16 @@ using WinBox.Core.Sandbox;
 // happens from the WM_ENDSESSION handler instead.
 var options = ShimArguments.Parse(args);
 var log = new ShimLog(options.StateDirectory + ".log");
-var state = new StateFolder(options.StateDirectory);
+// Unchanged files are linked to the last save rather than written again (see StateFolder).
+var linkFailures = 0;
+var state = new StateFolder(options.StateDirectory, (link, existing) =>
+{
+    if (Native.CreateHardLinkW(link, existing, 0) != 0)
+        return true;
+    if (Interlocked.Increment(ref linkFailures) == 1)
+        log.Write($"linking an unchanged file failed (error {System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}); copying instead");
+    return false;
+});
 var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 var quitGrace = TimeSpan.FromSeconds(10);
 var saveLock = new Lock();

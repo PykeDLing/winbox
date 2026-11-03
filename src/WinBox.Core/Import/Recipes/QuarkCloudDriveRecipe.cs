@@ -35,7 +35,7 @@ public sealed class QuarkCloudDriveRecipe : IRecipe
     /// <summary>The 夸克网盘Lite desktop widget; its version info has no OriginalFilename. Name taken from the app's own launch attempt.</summary>
     public IReadOnlyDictionary<string, string> PlaceholderFileNames { get; } = new Dictionary<string, string>
     {
-        ["code$GetAppWidgetExeName"] = "clouddrive_desktop_widget_independent.exe",
+        ["GetAppWidgetExeName"] = "clouddrive_desktop_widget_independent.exe",
     };
 
     public bool Matches(InstallerFacts facts)

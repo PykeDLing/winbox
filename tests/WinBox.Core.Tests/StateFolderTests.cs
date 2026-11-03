@@ -239,4 +239,110 @@ public sealed class StateFolderTests
         Assert.AreEqual("v1", Read(run3, "db.sqlite"));
         Assert.AreEqual("fine", Read(run3, "other.txt"));
     }
+
+    /// <summary>Stands in for a hard link: copies the file and notes which ones were linked.</summary>
+    private sealed class Links
+    {
+        public List<string> Made { get; } = [];
+
+        public bool Link(string link, string existing)
+        {
+            File.Copy(existing, link);
+            Made.Add(Path.GetFileName(link));
+            return true;
+        }
+    }
+
+    [TestMethod]
+    public void UnchangedFilesAreLinkedToTheLastSave()
+    {
+        var links = new Links();
+        var state = new StateFolder(Path.Combine(_root, "state"), links.Link);
+        var run1 = Dir("run1");
+        Put(run1, "cache.bin", "resources");
+        Put(run1, "settings.json", "old");
+        state.Save(run1, []);
+
+        var run2 = Dir("run2");
+        state.RestoreTo(run2);
+        Put(run2, "settings.json", "new!");
+        var stats = state.Save(run2, []);
+        var run3 = Dir("run3");
+        state.RestoreTo(run3);
+
+        CollectionAssert.AreEqual(new[] { "cache.bin" }, links.Made);
+        Assert.AreEqual(1, stats.Linked);
+        Assert.AreEqual(2, stats.Files);
+        Assert.AreEqual("resources", Read(run3, "cache.bin"));
+        Assert.AreEqual("new!", Read(run3, "settings.json"));
+    }
+
+    [TestMethod]
+    public void WhereLinksFailFilesAreCopiedWithoutTryingAgain()
+    {
+        var attempts = 0;
+        var state = new StateFolder(Path.Combine(_root, "state"), (_, _) => { attempts++; return false; });
+        var run1 = Dir("run1");
+        Put(run1, "a.bin", "same");
+        Put(run1, "b.bin", "same too");
+        state.Save(run1, []);
+
+        var run2 = Dir("run2");
+        state.RestoreTo(run2);
+        var stats = state.Save(run2, []);
+        var run3 = Dir("run3");
+        state.RestoreTo(run3);
+
+        Assert.AreEqual(1, attempts);
+        Assert.AreEqual(0, stats.Linked);
+        Assert.AreEqual("same", Read(run3, "a.bin"));
+        Assert.AreEqual("same too", Read(run3, "b.bin"));
+    }
+
+    [TestMethod]
+    public void AChangeThatKeepsLengthAndTimeIsStillSaved()
+    {
+        // Writes through a memory-mapped view can leave the modification time as it was.
+        var links = new Links();
+        var state = new StateFolder(Path.Combine(_root, "state"), links.Link);
+        var run1 = Dir("run1");
+        Put(run1, "data.mdb", "AAAA");
+        state.Save(run1, []);
+
+        var run2 = Dir("run2");
+        state.RestoreTo(run2);
+        var file = Path.Combine(run2, "data.mdb");
+        var time = File.GetLastWriteTimeUtc(file);
+        File.WriteAllText(file, "BBBB");
+        File.SetLastWriteTimeUtc(file, time);
+        state.Save(run2, []);
+        var run3 = Dir("run3");
+        state.RestoreTo(run3);
+
+        Assert.AreEqual(0, links.Made.Count);
+        Assert.AreEqual("BBBB", Read(run3, "data.mdb"));
+    }
+
+    [TestMethod]
+    public void ChromiumCachesAreLeftOutWhereverTheyAre()
+    {
+        var state = new StateFolder(Path.Combine(_root, "state"));
+        var run = Dir("run");
+        Put(run, @"App\User Data\Default\Code Cache\js\index", "x");
+        Put(run, @"App\User Data\Default\GPUCache\data_0", "x");
+        Put(run, @"App\User Data\Default\Cache\Cache_Data\data_1", "x");
+        Put(run, @"App\User Data\Default\Preferences", "keep");
+        // Only Chromium's own cache folder counts; an app's folder that happens to be called Cache is kept.
+        Put(run, @"Other\Cache\settings.ini", "keep");
+
+        state.Save(run, []);
+        var restored = Dir("restored");
+        state.RestoreTo(restored);
+
+        Assert.AreEqual("keep", Read(restored, @"App\User Data\Default\Preferences"));
+        Assert.AreEqual("keep", Read(restored, @"Other\Cache\settings.ini"));
+        Assert.IsFalse(Directory.Exists(Path.Combine(restored, @"App\User Data\Default\Code Cache")));
+        Assert.IsFalse(Directory.Exists(Path.Combine(restored, @"App\User Data\Default\GPUCache")));
+        Assert.IsFalse(Directory.Exists(Path.Combine(restored, @"App\User Data\Default\Cache")));
+    }
 }

@@ -105,8 +105,7 @@ public sealed class BoxStore
         Directory.Move(box.Paths.Root, doomed);
         try
         {
-            // Directory.Delete removes junctions and symlinks themselves without following them.
-            Directory.Delete(doomed, recursive: true);
+            DeleteTree(doomed);
             return true;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
@@ -117,6 +116,40 @@ public sealed class BoxStore
 
     private const string DeletingInfix = ".deleting-";
 
+    /// <summary>
+    /// Deletes a box's folder and everything in it. Directory.Delete refuses read-only folders, and apps leave those:
+    /// Windows marks shell folders such as Start Menu\Programs read-only, and the box's Roaming AppData has them as
+    /// soon as an app makes a Start menu shortcut. So a refused delete clears the read-only marks and tries again.
+    /// Links (the box profile's links to the user's folders) are deleted themselves, never followed.
+    /// </summary>
+    internal static void DeleteTree(string dir)
+    {
+        try
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            ClearReadOnly(new DirectoryInfo(dir));
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    private static void ClearReadOnly(DirectoryInfo dir)
+    {
+        // A link is deleted as it is; its attributes, and whatever it leads to, are left alone.
+        if (dir.Attributes.HasFlag(FileAttributes.ReparsePoint))
+            return;
+        dir.Attributes &= ~FileAttributes.ReadOnly;
+        foreach (var entry in dir.EnumerateFileSystemInfos("*", new EnumerationOptions { AttributesToSkip = 0, RecurseSubdirectories = false }))
+        {
+            if (entry is DirectoryInfo sub)
+                ClearReadOnly(sub);
+            else if (!entry.Attributes.HasFlag(FileAttributes.ReparsePoint) && entry.Attributes.HasFlag(FileAttributes.ReadOnly))
+                entry.Attributes &= ~FileAttributes.ReadOnly;
+        }
+    }
+
     /// <summary>Finishes deletes that a crash or a file still in use interrupted. Run at startup; what is still in use waits for the next time.</summary>
     public int CleanUpInterruptedDeletes()
     {
@@ -125,7 +158,7 @@ public sealed class BoxStore
         {
             try
             {
-                Directory.Delete(dir, recursive: true);
+                DeleteTree(dir);
                 count++;
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)

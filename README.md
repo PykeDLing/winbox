@@ -20,11 +20,16 @@ WinBox 是 [MacBox](https://github.com/PykeDLing/macbox) 的 Windows 版。
 2. 从 [Releases](https://github.com/PykeDLing/winbox/releases) 下载 `WinBox-<版本>-win-x64.zip`，解压到一个**路径短、当前用户可写**的文件夹，例如 `D:\WinBox`。盒子和它们的数据都放在这个文件夹下的 `Data\` 里。
 3. 运行 `WinBox.exe`。第一次运行时 Windows 可能提示"Windows 已保护你的电脑"，点"更多信息"，再点"仍要运行"。
 
-发布包自带 [innoextract](https://constexpr.org/innoextract/)（`tools\`），不用另外安装。卸载 WinBox：先在 WinBox 里删除所有盒子，再删除 WinBox 文件夹。
+发布包自带解包工具 [7-Zip](https://www.7-zip.org/) 和 [innounp](https://github.com/jrathlev/InnoUnpacker-Windows-GUI)（`tools\`），不用另外安装。卸载 WinBox：先在 WinBox 里删除所有盒子，再删除 WinBox 文件夹。
 
 ## 使用
 
-- **添加软件**：把安装包拖进窗口，或点"添加安装包…"。WinBox 从安装包里取出程序，不运行安装程序。
+- **添加软件**：把安装包拖进窗口，或点"添加安装包…"。WinBox 从安装包里取出程序，不运行安装程序。能添加的安装包：
+  - Inno Setup（1.2 到 7.1）、NSIS（包括 electron-builder 打的包）、Windows Installer（`.msi`）；
+  - 自解压的 7z 安装包、Squirrel 安装包（`Setup.exe` 里带 NuGet 包，常见于 Electron 软件）；
+  - 绿色版的压缩包（zip、7z、rar）和单个可执行文件。
+
+  WinBox 自己找出软件的主程序（优先用安装包里快捷方式指向的程序），基于 Chromium 的软件（Electron、CEF）自动关掉它自带的内层沙盒。
 - **打开 / 退出**：点卡片上的"打开"，软件在盒子里运行。点"退出"时，WinBox 像 Windows 注销时那样请软件自己保存并退出，再把数据保存回盒子。
 - **显示窗口**：关窗口后缩到托盘的软件，用卡片上的"显示窗口"找回。
 - **在盒外打开**：卡片的 ⋯ 菜单可以打开盒子能访问的文件夹，或者用这台电脑上的程序打开一个文件。
@@ -43,11 +48,12 @@ WinBox 是 [MacBox](https://github.com/PykeDLing/macbox) 的 Windows 版。
 | 层 | 作用 |
 |---|---|
 | **MSIX 应用包**（每个盒子一个） | Windows 把软件在 AppData 下新建的文件、对 HKCU 注册表的写入，重定向到这个包的私有存储。注销应用包时，系统一并删除这些数据。 |
-| **MXC 沙盒**（[Microsoft.Mxc.Sdk](https://www.nuget.org/packages/Microsoft.Mxc.Sdk) 的 ProcessContainer） | 默认拒绝访问。软件只能读写盒子自己的目录、用户的个人文件夹（桌面、文档、下载等）和 D:、E: 这类非系统盘；非系统盘上已经安装的程序（按卸载信息和 App Paths 找出的安装目录）一律拒绝访问。软件修改不了系统里已有的配置。 |
+| **MXC 沙盒**（[Microsoft.Mxc.Sdk](https://www.nuget.org/packages/Microsoft.Mxc.Sdk) 的 ProcessContainer） | 默认拒绝访问。软件只能读写盒子自己的目录、用户的个人文件夹（桌面、文档、下载等）和 D:、E: 这类非系统盘；非系统盘上已经安装的程序（按卸载信息和 App Paths 找出的安装目录）一律拒绝访问，WinBox 自己的程序和数据目录也一样，连在里面新建文件都不行。软件修改不了系统里已有的配置。 |
+| **盒子自己的用户目录** | 软件看到的用户目录在盒子里：它的 AppData（设置、登录信息）存在盒子里，和本机装的同一个软件互不影响；桌面、文档、下载等个人文件夹链接到你真实的文件夹。 |
 
 此外：
 
-- **导入时不运行安装程序**：WinBox 直接从安装包里取出程序（Inno Setup 安装包用 innoextract 解开）。在线安装器（"迷你包"）通过配方找到完整安装包，并校验签名。
+- **导入时不运行安装程序**：WinBox 直接从安装包里取出程序：Inno Setup 用 innounp 解开，NSIS、自解压包和压缩包用 7-Zip，MSI 按它自己的数据库（只读打开）把文件放到该放的位置。安装包里再套一层的程序包（electron-builder 的 `app-64.7z`、Squirrel 的 NuGet 包）也一起解开。在线安装器（"迷你包"）通过配方找到完整安装包，并校验签名。
 - **BoxShim**：沙盒里启动的第一个进程。沙盒的 LocalAppData 每次运行后会被系统清空，BoxShim 在启动前把上次的数据恢复进去，在软件退出或 Windows 关机时再保存回盒子。保存是原子的，中途断电也不会留下半新半旧的数据。它还负责：
   - **退出**：像 Windows 注销时那样请软件自己保存并退出（关窗口只会缩到托盘的软件也会真正退出）；10 秒内没退出的部分才被结束。
   - **显示窗口**：WinBox 让 BoxShim 在沙盒里再启动一次软件，单实例的软件就会把缩到托盘的窗口找回来。
@@ -56,14 +62,17 @@ WinBox 是 [MacBox](https://github.com/PykeDLing/macbox) 的 Windows 版。
 
 ## 从源码构建
 
-需要 [.NET 10 SDK](https://dotnet.microsoft.com/)。生成发布包还需要 [Visual Studio 生成工具](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio)里的"使用 C++ 的桌面开发"（只要命令行工具，不需要 Visual Studio 本体）：WinBox 用 Native AOT 编译成本机代码，运行时不需要 .NET。导入 Inno Setup 安装包需要 innoextract：放在 PATH 里，或用环境变量 `WINBOX_INNOEXTRACT` 指定位置。
+需要 [.NET 10 SDK](https://dotnet.microsoft.com/)。生成发布包还需要 [Visual Studio 生成工具](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio)里的"使用 C++ 的桌面开发"（只要命令行工具，不需要 Visual Studio 本体）：WinBox 用 Native AOT 编译成本机代码，运行时不需要 .NET。
 
 在仓库根目录：
 
 ```powershell
+.\scripts\get-tools.ps1     # 下载解包工具（7-Zip、innounp，校验 SHA-256）到 .tools\，构建时复制到程序旁边的 tools\
 dotnet build
 dotnet test
 ```
+
+解包工具也可以用环境变量 `WINBOX_7ZIP`、`WINBOX_INNOUNP` 指定位置。
 
 开发时用环境变量 `WINBOX_DATA_ROOT` 把数据放在仓库下的 `.data\`（相当于安装目录里的 `Data\`）：
 
@@ -78,7 +87,7 @@ dotnet run --project src\WinBox.Cli -- <命令>      # 命令行，和界面使�
 | 命令 | 作用 |
 |---|---|
 | `info` | 沙盒、应用包、本机守卫的状态 |
-| `import <安装包>` | 导入，并为盒子注册应用包 |
+| `import <安装包> [--no-package]` | 导入，并为盒子注册应用包（`--no-package`：先不注册，第一次 `run` 时再注册） |
 | `list` | 列出盒子 |
 | `run <盒子 id 或名称>` | 打开 |
 | `show <盒子>` | 找回软件被关掉的窗口 |
@@ -89,7 +98,7 @@ dotnet run --project src\WinBox.Cli -- <命令>      # 命令行，和界面使�
 发布包：
 
 ```powershell
-.\scripts\release.ps1                      # 生成 artifacts\release\WinBox-<版本>-win-x64.zip 和它的 SHA-256
+.\scripts\release.ps1                      # 生成 artifacts\release\WinBox-<版本>-win-x64.zip 和它的 SHA-256（先运行过 get-tools.ps1）
 ```
 
 版本号在 `Directory.Build.props` 里。

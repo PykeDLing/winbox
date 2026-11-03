@@ -59,6 +59,9 @@ internal static unsafe partial class Native
     [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16)]
     public static partial nint CreateJobObjectW(nint attributes, string? name);
 
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    public static partial int CreateHardLinkW(string fileName, string existingFileName, nint securityAttributes);
+
     [LibraryImport("kernel32.dll")]
     public static partial int AssignProcessToJobObject(nint job, nint process);
 

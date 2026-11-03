@@ -18,7 +18,10 @@ public sealed class BoxShimDeployer(string payloadDirectory)
         if (!File.Exists(Path.Combine(payloadDirectory, ShimArguments.ExecutableName)))
             throw new InvalidOperationException($"BoxShim payload not found in {payloadDirectory}.");
         Payload.Sync(payloadDirectory, box.Shim);
-        // Boxes imported before BoxShim existed have no State folder; the sandbox needs it to exist.
+        // Boxes imported before BoxShim existed have no State folder; the sandbox needs it to exist. Nor do older
+        // boxes have the Roaming folder APPDATA points at.
         Directory.CreateDirectory(box.LocalAppDataState);
+        Directory.CreateDirectory(box.Roaming);
+        AppFolderAccess.Ensure(box.App);
     }
 }

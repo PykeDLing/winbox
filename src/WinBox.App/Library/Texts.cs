@@ -34,9 +34,10 @@ public static class Texts
     public static string Issue(CompatibilityIssue issue) => issue.Code switch
     {
         IssueCode.InstallerScriptsSkipped => "没有运行安装程序：右键菜单、开机自启等安装步骤都已跳过",
-        IssueCode.SelfUpdaterDisabled => "自带的自动更新不可用，由 WinBox 负责更新",
+        IssueCode.SelfUpdaterDisabled => "自带的自动更新不可用",
         IssueCode.FilesOutsideAppSkipped => "安装包里要装到程序目录以外的文件没有放进盒子",
         IssueCode.ShellExtensionUnavailable => "右键菜单等资源管理器扩展不可用",
+        IssueCode.InnerSandboxDisabled => "基于 Chromium 的软件：它自带的沙盒已关闭，由 WinBox 的沙盒负责隔离",
         _ => issue.Code.ToString(),
     };
 
@@ -53,9 +54,11 @@ public static class Texts
     public static string ImportFailed(ImportFailure failure, string? detail) => failure switch
     {
         ImportFailure.UnsupportedFormat => $"暂不支持这种安装包{Detail(detail)}",
-        ImportFailure.StubWithoutRecipe => "这是一个在线安装器，WinBox 还不知道去哪里拿它的完整安装包",
+        ImportFailure.StubWithoutRecipe => "这是一个在线安装器，或 WinBox 还不认识的安装程序。请下载软件的完整安装包（离线安装包）再添加",
         ImportFailure.UntrustedPayload => $"下载到的安装包签名对不上，已停止{Detail(detail)}",
         ImportFailure.NoEntryFound => "安装包里没有找到可以启动的程序",
+        ImportFailure.PackagedApp => "这是 MSIX 应用包，Windows 会自己隔离安装它，不需要放进盒子",
+        ImportFailure.ExtractionFailed => $"没能解开这个安装包（可能已损坏或加了密）{Detail(detail)}",
         _ => failure.ToString(),
     };
 
@@ -90,6 +93,15 @@ public static class Texts
     public const string FolderLeftOver = "盒子文件夹里还有文件在使用，暂时没删掉，WinBox 下次启动时会再删";
 
     public const string StillRunning = "它在 75 秒内没有退出，盒子没有删除。请等它退出后再删除。";
+
+    /// <summary>Why something could not be done to a box right now.</summary>
+    public static string Busy(BoxBusyReason reason) => reason switch
+    {
+        BoxBusyReason.Running => "它已经在运行（可能是从另一个 WinBox 或命令行打开的）",
+        _ => "另一个 WinBox 或命令行正在打开、注册或删除这个盒子，请稍后再试",
+    };
+
+    public static string RegisterFailed(Exception e) => $"盒子已添加，但它的应用包没能注册：{e.Message}。打开时会再试一次";
 
     /// <summary>Tells same-named boxes apart (two imports of one installer look identical otherwise).</summary>
     public static string Added(DateTimeOffset createdAt) => $"添加于 {createdAt.ToLocalTime():M月d日 HH:mm}";

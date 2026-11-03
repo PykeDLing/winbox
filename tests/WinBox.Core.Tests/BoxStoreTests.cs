@@ -100,4 +100,50 @@ public sealed class BoxStoreTests
         Assert.AreEqual(0, t.Store.Load().Count);
         Assert.AreEqual(0, Directory.GetDirectories(t.Paths.Boxes).Length);
     }
+
+    [TestMethod]
+    public void ReadOnlyFoldersAndLinksDoNotStopADelete()
+    {
+        using var t = new TestBox();
+        var box = t.Create(TestBox.Config());
+        // What an app leaves in the box profile: Windows marks shell folders read-only.
+        var startup = Directory.CreateDirectory(Path.Combine(box.Paths.Roaming, "Microsoft", "Windows", "Start Menu", "Programs", "Startup"));
+        File.WriteAllText(Path.Combine(startup.FullName, "app.lnk"), "");
+        File.SetAttributes(Path.Combine(startup.FullName, "app.lnk"), FileAttributes.ReadOnly);
+        for (var dir = startup; dir.Name != "Microsoft"; dir = dir.Parent!)
+            dir.Attributes |= FileAttributes.ReadOnly;
+        // And a link to a folder of the user's, which must outlive the box.
+        var outside = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "winbox-tests", Guid.NewGuid().ToString("N")));
+        File.WriteAllText(Path.Combine(outside.FullName, "keep.txt"), "mine");
+        outside.Attributes |= FileAttributes.ReadOnly;
+        try
+        {
+            var linked = TryLink(Path.Combine(box.Paths.Profile, "Documents"), outside.FullName);
+
+            Assert.IsTrue(t.Store.Delete(box));
+
+            Assert.AreEqual(0, Directory.GetDirectories(t.Paths.Boxes).Length);
+            Assert.IsTrue(File.Exists(Path.Combine(outside.FullName, "keep.txt")), linked ? "the link's target was deleted" : "no link made");
+            Assert.IsTrue(new DirectoryInfo(outside.FullName).Attributes.HasFlag(FileAttributes.ReadOnly));
+        }
+        finally
+        {
+            outside.Attributes &= ~FileAttributes.ReadOnly;
+            outside.Delete(recursive: true);
+        }
+    }
+
+    private static bool TryLink(string link, string target)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(link)!);
+            Directory.CreateSymbolicLink(link, target);
+            return true;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return false; // Symbolic links need Developer Mode; the read-only part is tested all the same.
+        }
+    }
 }

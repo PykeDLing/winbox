@@ -35,6 +35,15 @@ public sealed class BoxPaths
     public string Icon => Path.Combine(Root, "icon.png");
     public string App => Path.Combine(Root, "App");
     public string Data => Path.Combine(Root, "Data");
+
+    /// <summary>
+    /// The user profile the app sees (USERPROFILE inside the sandbox): its AppData is the box's own, and its personal
+    /// folders (Desktop, Documents...) are links to the user's real ones. See WinBox.Platform's BoxProfile.
+    /// </summary>
+    public string Profile => Path.Combine(Data, "Profile");
+
+    /// <summary>The app's Roaming AppData (APPDATA inside the sandbox), kept with the rest of its data.</summary>
+    public string Roaming => Path.Combine(Profile, "AppData", "Roaming");
     public string Tmp => Path.Combine(Root, "Tmp");
     public string Shim => Path.Combine(Root, "Shim");
     public string ShimExecutable => Path.Combine(Shim, Sandbox.ShimArguments.ExecutableName);

@@ -98,6 +98,9 @@ public enum IssueCode
 
     /// <summary>The app registers a shell extension (context menu) that is unavailable inside the box.</summary>
     ShellExtensionUnavailable,
+
+    /// <summary>The app is built on Chromium (Electron, CEF); its own sandbox is turned off and the box's sandbox isolates it.</summary>
+    InnerSandboxDisabled,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<InstallerKind>))]
@@ -113,4 +116,13 @@ public enum InstallerKind
 
     /// <summary>A small online installer that downloads the real package at install time.</summary>
     Stub,
+
+    /// <summary>A 7z archive, or an installer that is a 7z archive behind a small program (self-extracting).</summary>
+    SevenZip,
+
+    /// <summary>A Squirrel installer (Setup.exe carrying a NuGet package), common for Electron apps.</summary>
+    Squirrel,
+
+    /// <summary>Another archive format 7-Zip reads (RAR, CAB, ISO...), holding a portable app.</summary>
+    Archive,
 }

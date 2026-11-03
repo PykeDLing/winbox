@@ -11,7 +11,6 @@ public sealed record LaunchSpec
 
     /// <summary>Paths the app may not touch even when they sit inside a granted folder.</summary>
     public IReadOnlyList<string> DeniedPaths { get; init; } = [];
-
     /// <summary>Stable sandbox name; null lets MXC pick a new one per run.</summary>
     public string? ContainerName { get; init; }
     public IReadOnlyDictionary<string, string> Environment { get; init; } = new Dictionary<string, string>();

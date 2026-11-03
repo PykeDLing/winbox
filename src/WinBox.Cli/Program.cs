@@ -1,4 +1,4 @@
-﻿using WinBox.Core.Boxes;
+using WinBox.Core.Boxes;
 using WinBox.Core.Guard;
 using WinBox.Core.Import;
 using WinBox.Core.Packaging;
@@ -17,7 +17,8 @@ try
     {
         ["info"] => Info(),
         ["list"] => List(),
-        ["import", var file] => await Import(file),
+        ["import", var file] => await Import(file, register: true),
+        ["import", var file, "--no-package"] => await Import(file, register: false),
         ["package", var box] => await Package(box),
         ["run", var box, ..] => await Run(box, args.Skip(2).ToArray()),
         ["stop", var box] => Stop(box),
@@ -38,6 +39,11 @@ catch (InvalidOperationException e)
     Console.Error.WriteLine(e.Message);
     return 2;
 }
+catch (BoxBusyException e)
+{
+    Console.Error.WriteLine($"box is busy: {e.Reason}");
+    return 2;
+}
 
 int Usage()
 {
@@ -45,7 +51,8 @@ int Usage()
         usage: winbox <command>
           info                     sandbox and package support, data root, tools
           list                     boxes in the library
-          import <installer>       create a box from an installer (stubs are resolved through recipes)
+          import <installer> [--no-package]
+                                   create a box from an installer (stubs are resolved through recipes)
                                    and register its package
           package <id|name>        (re)register the box's MSIX package
           run <id|name> [options]  launch a box inside its package. Options ({data} = the box's Data dir):
@@ -77,7 +84,8 @@ int Info()
     Console.WriteLine($"sandbox       : {(support.IsSupported ? "ProcessContainer available" : "unavailable: " + support.Reason)}");
     Console.WriteLine($"capabilities  : {string.Join(", ", support.Capabilities)}");
     Console.WriteLine($"packages      : {host.Packages.GetUnavailableReason() ?? "available (Developer Mode, unsigned loose layout)"}");
-    Console.WriteLine($"innoextract   : {host.InnoextractPath ?? "not found (set WINBOX_INNOEXTRACT)"}");
+    Console.WriteLine($"innounp       : {host.InnounpPath ?? $"not found (set {WinBox.Platform.Import.InnoExtractor.PathVariable})"}");
+    Console.WriteLine($"7-Zip         : {host.SevenZipPath ?? $"not found (set {WinBox.Platform.Import.SevenZip.PathVariable})"}");
     var areas = WindowsHostAreas.Current();
     var protectedPrograms = areas.InstalledPrograms.Count(p => areas.DataDrives.Any(d => p.StartsWith(d, StringComparison.OrdinalIgnoreCase) && p.Length > d.Length));
     Console.WriteLine($"personal      : {string.Join(", ", areas.PersonalFolders)}");
@@ -100,7 +108,7 @@ int List()
                     : "none";
                 Console.WriteLine($"{b.Config.Id}  {b.Config.Name}  {b.Config.Version}  entry={b.Config.Entry}");
                 Console.WriteLine($"    package: {package}");
-                if (PackagedBoxRunner.ReadRun(b) is { } run)
+                if (host.Runner.ReadRun(b) is { } run)
                     Console.WriteLine($"    last run: {run.State} host={run.HostProcessId} exit={run.ExitCode} {run.Error}");
                 foreach (var issue in b.Config.Issues)
                     Console.WriteLine($"    issue: {issue.Code} ({issue.Severity}) {issue.Detail}");
@@ -113,7 +121,7 @@ int List()
     return 0;
 }
 
-async Task<int> Import(string file)
+async Task<int> Import(string file, bool register)
 {
     var lastStage = (ImportStage?)null;
     var lastPercent = -1;
@@ -132,24 +140,21 @@ async Task<int> Import(string file)
             lastPercent = percent;
         }
     });
-    var box = await host.Import.ImportAsync(file, progress);
+    var (box, registrationError) = await host.Manager.ImportAsync(file, progress, register: register);
     Console.WriteLine($"imported {box.Config.Name} {box.Config.Version} -> {box.Paths.Root}");
     Console.WriteLine($"entry: {box.Config.Entry}  args: {string.Join(' ', box.Config.LaunchArguments)}");
-    if (host.Packages.GetUnavailableReason() is { } reason)
-    {
-        Console.WriteLine($"package not registered: {reason}");
-        return 0;
-    }
-    return await Package(box.Config.Id.ToString());
+    foreach (var issue in box.Config.Issues)
+        Console.WriteLine($"issue: {issue.Code} ({issue.Severity}) {issue.Detail}");
+    Console.WriteLine(registrationError is null
+        ? register ? $"package registered: {box.Config.Package?.FamilyName}" : "package not registered (--no-package); `run` registers it"
+        : $"package not registered ({registrationError.Message}); `run` tries again");
+    return 0;
 }
 
 async Task<int> Package(string key)
 {
-    var box = Find(key);
-    var package = await host.Packages.RegisterAsync(box);
-    var updated = box with { Config = box.Config with { Package = package } };
-    host.Store.Save(updated);
-    Console.WriteLine($"package registered: {package.FamilyName}");
+    var box = await host.Manager.RegisterAsync(Find(key));
+    Console.WriteLine($"package registered: {box.Config.Package?.FamilyName}");
     return 0;
 }
 
@@ -185,14 +190,14 @@ async Task<int> Run(string key, string[] options)
         }
     }
 
-    var planned = host.Planner.Plan(box, DateTimeOffset.Now);
-    var spec = planned with
+    LaunchSpec Customize(LaunchSpec planned) => planned with
     {
         // --exe replaces the app (diagnostics): its arguments are only the --arg values.
         Executable = executable ?? planned.Executable,
         Arguments = executable is null ? [.. planned.Arguments, .. extraArgs] : extraArgs,
         Capabilities = [.. planned.Capabilities, .. capabilities],
-        Environment = new Dictionary<string, string>(planned.Environment.Concat(environment)),
+        // --env wins over what WinBox sets (TEMP, APPDATA...).
+        Environment = new Dictionary<string, string>(planned.Environment.Where(e => !environment.ContainsKey(e.Key)).Concat(environment)),
         AllowHostLoopbackIngress = loopback,
         PermissiveCapture = permissive,
         ReadWritePaths = [.. planned.ReadWritePaths, .. extraWritable],
@@ -203,19 +208,23 @@ async Task<int> Run(string key, string[] options)
     foreach (var (_, value) in environment)
         if (value.StartsWith(box.Paths.Data, StringComparison.OrdinalIgnoreCase))
             Directory.CreateDirectory(value);
-    Console.WriteLine($"launching {spec.Executable} {string.Join(' ', spec.Arguments)}");
 
     if (!direct)
     {
-        if (box.Config.Package is not { } package || !host.Packages.IsRegistered(package))
+        var record = await host.Manager.RunAsync(box, new RunOptions
         {
-            Console.Error.WriteLine($"{box.Config.Name} has no registered package; run `winbox package {key}` first.");
-            return 4;
-        }
-        Console.WriteLine($"via package {package.FamilyName}");
-        var record = await host.PackagedRunner.RunAsync(
-            box, spec, seconds is int s ? TimeSpan.FromSeconds(s) : null,
-            r => Console.WriteLine($"[{r.State}] host={r.HostProcessId} app={r.AppProcessId}"));
+            Customize = spec =>
+            {
+                spec = Customize(spec);
+                Console.WriteLine($"launching {spec.Executable} {string.Join(' ', spec.Arguments)}");
+                return spec;
+            },
+            Registered = b => Console.WriteLine($"package registered: {b.Config.Package?.FamilyName}"),
+            Limit = seconds is int s ? TimeSpan.FromSeconds(s) : null,
+            Update = r => Console.WriteLine($"[{r.State}] host={r.HostProcessId} app={r.AppProcessId}"),
+        });
+        if (record is null)
+            return 5;
         Console.WriteLine($"{record.State}: exit {record.ExitCode} (0x{record.ExitCode ?? 0:X8}) forceStopped={record.ForceStopped} {record.Error}");
         if (record.DeniedAccesses is { } denied)
             Console.WriteLine($"denied accesses: {denied} -> {record.DenialsPath}");
@@ -224,8 +233,10 @@ async Task<int> Run(string key, string[] options)
     }
 
     Console.WriteLine("WARNING: direct run - no package, the app's AppData and HKCU writes will be denied");
+    var directSpec = Customize(host.Planner.Plan(box, DateTimeOffset.Now));
+    Console.WriteLine($"launching {directSpec.Executable} {string.Join(' ', directSpec.Arguments)}");
     host.Shim.Deploy(box.Paths);
-    using var process = await host.Sandbox.LaunchAsync(spec);
+    using var process = await host.Sandbox.LaunchAsync(directSpec);
     Console.WriteLine($"pid {process.ProcessId}");
     foreach (var w in process.Warnings)
         Console.WriteLine($"warning: {w}");
@@ -245,7 +256,7 @@ async Task<int> Run(string key, string[] options)
 int Show(string key)
 {
     var box = Find(key);
-    var sent = PackagedBoxRunner.RequestShow(box);
+    var sent = host.Runner.RequestShow(box);
     Console.WriteLine(sent ? $"asked {box.Config.Name} to show its window" : $"{box.Config.Name} is not running");
     return sent ? 0 : 6;
 }
@@ -253,7 +264,7 @@ int Show(string key)
 int Stop(string key)
 {
     var box = Find(key);
-    var sent = PackagedBoxRunner.RequestStop(box.Config.Id);
+    var sent = host.Runner.RequestStop(box.Config.Id);
     Console.WriteLine(sent ? $"stop requested for {box.Config.Name}" : $"{box.Config.Name} is not running");
     return sent ? 0 : 6;
 }
@@ -261,40 +272,26 @@ int Stop(string key)
 async Task<int> Remove(string key)
 {
     var box = Find(key);
-    if (PackagedBoxRunner.RequestStop(box.Config.Id))
+    if (host.Runner.IsRunning(box))
+        Console.WriteLine("box is running; asking it to quit");
+    RemoveOutcome outcome;
+    try
     {
-        Console.WriteLine("box was running; asked it to quit");
-        // As long as BoxHost may take: the quit and save graces, then killing the sandbox and its teardown.
-        var deadline = DateTimeOffset.Now.AddSeconds(75);
-        while (PackagedBoxRunner.IsRunning(box) && DateTimeOffset.Now < deadline)
-            await Task.Delay(500);
-        if (PackagedBoxRunner.IsRunning(box))
-        {
-            Console.Error.WriteLine($"{box.Config.Name} is still running; not removed");
-            return 8;
-        }
+        outcome = await host.Manager.RemoveAsync(box);
     }
-    if (box.Config.Package is { } package)
+    catch (BoxBusyException e)
     {
-        // Windows deletes the package's private storage (redirected AppData files, HKCU hive) with it.
-        await host.Packages.UnregisterAsync(package);
-        Console.WriteLine($"package unregistered: {package.FamilyName}");
+        Console.Error.WriteLine($"{box.Config.Name} not removed: {e.Reason}");
+        return 8;
     }
-    // Whatever on the host still names this box's folder or its package is now dangling: Windows' own records
-    // of the app (display-name cache, UserAssist, records filed under the package name...) and, if something
-    // went wrong, leaks.
-    var family = box.Config.Package?.FamilyName;
-    var references = host.Guard.Scan(box.Paths.Root, f => string.Equals(f, family, StringComparison.OrdinalIgnoreCase));
-    if (references.Count > 0)
-    {
-        var cleanup = host.Guard.Remove(references, box.Paths.Root, GuardBackupDirectory($"remove-{box.Config.Id:N}"));
+    if (outcome.Cleanup is { } cleanup)
         Console.WriteLine($"host references removed: {cleanup.Removed} (backup: {cleanup.BackupDirectory})");
-        foreach (var failure in cleanup.Failures)
-            Console.Error.WriteLine($"  could not remove {failure}");
-    }
-    Console.WriteLine(host.Store.Delete(box)
-        ? $"removed {box.Config.Name}"
-        : $"removed {box.Config.Name}, but some files are still in use; they go the next time WinBox starts");
+    foreach (var failure in outcome.Failures)
+        Console.Error.WriteLine($"  could not remove {failure}");
+    Console.WriteLine(outcome.FolderLeftOver
+        ? $"removed {box.Config.Name}, but some files are still in use; they go the next time WinBox starts"
+        : $"removed {box.Config.Name}");
+    // Windows files some records under the package's name only after it is gone; `guard --fix` clears them later.
     return 0;
 }
 
@@ -302,7 +299,7 @@ int Guard(bool fix)
 {
     var references = host.Guard.Scan(host.Paths.Boxes);
     var leaks = references.Where(r => r.Kind == HostReferenceKind.Leak).ToList();
-    var orphans = host.FindLeftovers();
+    var orphans = host.Manager.FindLeftovers();
     Console.WriteLine($"leaks: {leaks.Count}");
     foreach (var leak in leaks)
         Console.WriteLine($"  {leak}");
@@ -316,7 +313,7 @@ int Guard(bool fix)
     List<HostReference> doomed = [.. leaks, .. orphans];
     if (doomed.Count == 0)
         return 0;
-    var cleanup = host.Guard.Remove(doomed, host.Paths.Boxes, GuardBackupDirectory("fix"));
+    var cleanup = host.Manager.Clear(doomed, "fix");
     Console.WriteLine($"removed {cleanup.Removed} (backup: {cleanup.BackupDirectory})");
     foreach (var failure in cleanup.Failures)
         Console.Error.WriteLine($"  could not remove {failure}");
@@ -333,9 +330,6 @@ void WarnAboutLeaks()
         Console.Error.WriteLine($"  {leak}");
     Console.Error.WriteLine("run `winbox guard --fix` to remove them");
 }
-
-string GuardBackupDirectory(string reason) =>
-    Path.Combine(host.Paths.Logs, "guard", $"{DateTimeOffset.Now:yyyyMMdd-HHmmss}-{reason}");
 
 // Exactly one box or nothing: commands like remove must never pick "the first" of several matches.
 LoadedBox Find(string key)

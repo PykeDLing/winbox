@@ -28,41 +28,31 @@ public sealed class WinBoxHost : IDisposable
             [AppContext.BaseDirectory, Paths.Root]);
         Packages = new MsixBoxPackageManager(MsixBoxPackageManager.DefaultPayloadDirectory);
         Shim = new BoxShimDeployer(BoxShimDeployer.DefaultPayloadDirectory);
-        PackagedRunner = new PackagedBoxRunner(Packages, Shim);
+        Runner = new PackagedBoxRunner(Packages, Shim);
         Guard = new WindowsHostGuard();
-        InnoextractPath = InnoExtractor.Locate();
+        InnounpPath = InnoExtractor.Locate();
+        SevenZipPath = SevenZip.Locate();
 
         _http = new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = true, MaxAutomaticRedirections = 10 });
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("WinBox/0.1");
 
+        // Asked in this order; the first that recognizes the installer unpacks it.
         var extractors = new List<IPackageExtractor>();
-        if (InnoextractPath is not null)
-            extractors.Add(new InnoExtractor(InnoextractPath));
+        if (InnounpPath is not null)
+            extractors.Add(new InnoExtractor(InnounpPath));
+        if (SevenZipPath is not null)
+        {
+            var sevenZip = new SevenZip(SevenZipPath);
+            extractors.Add(new MsiExtractor(sevenZip));
+            extractors.Add(new SevenZipExtractor(sevenZip));
+        }
+        extractors.Add(new PortableExtractor());
 
         Import = new ImportPipeline(Paths, Store, new WindowsFileInspector(), extractors, new HttpDownloader(_http), Recipes);
+        Manager = new BoxManager(Paths, Store, Import, Packages, Runner, Guard, Planner);
     }
 
     public static IReadOnlyList<IRecipe> Recipes { get; } = [new QuarkCloudDriveRecipe()];
-
-    /// <summary>
-    /// Windows' records of boxes that are gone: those filed under the name of a box package that is no longer
-    /// registered (Windows writes some of them only after the package is removed, so a removal cannot catch
-    /// them all), and those naming a box folder that no longer exists. Packages still registered count as in
-    /// use whoever registered them, so another WinBox's boxes are never taken for leftovers.
-    /// </summary>
-    public IReadOnlyList<HostReference> FindLeftovers()
-    {
-        var inUse = Store.Load().OfType<LoadedBox>()
-            .Select(b => b.Config.Package?.FamilyName).OfType<string>()
-            .Concat(Packages.RegisteredBoxFamilies())
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return Guard.Scan(Paths.Boxes, family => !inUse.Contains(family))
-            .Where(r => r.Kind == HostReferenceKind.Trace &&
-                (r.Package is not null ||
-                 (HostReferenceRules.BoxFolderIn($"{r.Name}\0{r.Detail}", Paths.Boxes) is { } folder &&
-                  !Directory.Exists(Path.Combine(Paths.Boxes, folder)))))
-            .ToList();
-    }
 
     public AppPaths Paths { get; }
     public BoxStore Store { get; }
@@ -70,10 +60,17 @@ public sealed class WinBoxHost : IDisposable
     public LaunchPlanner Planner { get; }
     public IBoxPackageManager Packages { get; }
     public BoxShimDeployer Shim { get; }
-    public PackagedBoxRunner PackagedRunner { get; }
+    public IBoxRunner Runner { get; }
     public IHostGuard Guard { get; }
     public ImportPipeline Import { get; }
-    public string? InnoextractPath { get; }
+
+    /// <summary>What the app and the CLI do to boxes: import, register, run, remove, clear the host.</summary>
+    public BoxManager Manager { get; }
+    /// <summary>innounp, which unpacks Inno Setup installers; null when it is not there.</summary>
+    public string? InnounpPath { get; }
+
+    /// <summary>7-Zip, which unpacks NSIS installers, MSI cabinets and archives; null when it is not there.</summary>
+    public string? SevenZipPath { get; }
 
     public void Dispose() => _http.Dispose();
 }

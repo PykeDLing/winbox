@@ -30,8 +30,9 @@ public interface IRecipe
     IReadOnlyList<CompatibilityIssue> KnownIssues { get; }
 
     /// <summary>
-    /// Real names for installer placeholder files ("code$..." names computed by the installer script)
-    /// whose PE version info does not carry an original file name.
+    /// Real names for files whose names the installer script computes, keyed by the script function
+    /// ("GetAppWidgetExeName" for a file unpacked as "{code_GetAppWidgetExeName}"). They win over the
+    /// name in the file's version information.
     /// </summary>
     IReadOnlyDictionary<string, string> PlaceholderFileNames => new Dictionary<string, string>();
 }

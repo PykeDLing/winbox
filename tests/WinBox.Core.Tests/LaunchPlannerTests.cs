@@ -46,30 +46,89 @@ public sealed class LaunchPlannerTests
     }
 
     [TestMethod]
-    public void RestOfWinBoxIsDeniedWhenAGrantedFolderHoldsIt()
+    public void WinBoxIsCutOutOfAGrantedFolderThatHoldsIt()
     {
-        using var t = new TestBox();
-        var box = t.Create(TestBox.Config());
-        var other = t.Create(TestBox.Config());
-        t.Paths.EnsureCreated();
-        var install = Directory.CreateDirectory(Path.Combine(t.Root, "..", Path.GetFileName(t.Root) + "-install")).FullName;
+        // A personal folder holding WinBox as in development: <personal>\dev\WinBox (install) with Data inside.
+        var personal = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "winbox-tests", Guid.NewGuid().ToString("N"))).FullName;
         try
         {
-            // The data root and the install directory both sit in a granted personal folder, as in development.
-            var personal = Path.GetDirectoryName(t.Root)!;
-            var spec = new LaunchPlanner([personal], LocalAppData, [install, t.Root]).Plan(box, DateTimeOffset.Now);
-            var denied = spec.DeniedPaths.ToList();
+            var install = Directory.CreateDirectory(Path.Combine(personal, "dev", "WinBox")).FullName;
+            File.WriteAllText(Path.Combine(install, "WinBox.exe"), "");
+            var notes = Path.Combine(personal, "notes.txt");
+            File.WriteAllText(notes, "");
+            var photos = Directory.CreateDirectory(Path.Combine(personal, "Photos")).FullName;
+            var project = Directory.CreateDirectory(Path.Combine(personal, "dev", "project")).FullName;
+            using var t = new TestBox(Path.Combine(install, "Data"));
+            var box = t.Create(TestBox.Config());
+            var other = t.Create(TestBox.Config());
 
-            foreach (var item in new[] { other.Paths.Root, t.Paths.Downloads, t.Paths.Logs, install, box.Paths.ConfigFile })
-                CollectionAssert.Contains(denied, item);
-            // Nothing that holds the box's own grants may be denied: that would take the grants back.
-            foreach (var item in new[] { t.Root, t.Paths.Boxes, box.Paths.Root, box.Paths.App, box.Paths.Data, box.Paths.State })
-                CollectionAssert.DoesNotContain(denied, item);
+            var spec = new LaunchPlanner([personal], LocalAppData, [install, t.Root]).Plan(box, DateTimeOffset.Now);
+            var granted = spec.ReadWritePaths.ToList();
+
+            // The rest of the folder stays the app's, entry by entry.
+            CollectionAssert.IsSubsetOf(new[] { notes, photos, project, box.Paths.App, box.Paths.Data, box.Paths.State }, granted);
+            // No grant covers anything of WinBox apart from the box's own items, so the app cannot even add a file
+            // next to WinBox.exe; and the folders leading to WinBox are not granted whole.
+            var own = box.Paths.ReadOnlyItems.Concat(box.Paths.WritableItems).ToList();
+            foreach (var grant in granted.Except(own))
+            {
+                Assert.IsFalse(IsSameOrUnder(install, grant), $"{grant} covers WinBox");
+                Assert.IsFalse(IsSameOrUnder(grant, install), $"{grant} is inside WinBox");
+            }
+            CollectionAssert.DoesNotContain(granted, other.Paths.App);
         }
         finally
         {
-            Directory.Delete(install, recursive: true);
+            Directory.Delete(personal, recursive: true);
         }
+    }
+
+    [TestMethod]
+    public void WinBoxIsCutOutOfAGrantedDrive()
+    {
+        // The release layout: unzipped to a top-level folder of a data drive (D:\WinBox), data inside it.
+        var drive = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "winbox-tests", Guid.NewGuid().ToString("N"))).FullName;
+        try
+        {
+            var install = Directory.CreateDirectory(Path.Combine(drive, "WinBox")).FullName;
+            var music = Directory.CreateDirectory(Path.Combine(drive, "Music")).FullName;
+            using var t = new TestBox(Path.Combine(install, "Data"));
+            var box = t.Create(TestBox.Config());
+            var areas = new HostAreas([], [drive], []);
+
+            var spec = new LaunchPlanner(() => areas, LocalAppData, [install, t.Root]).Plan(box, DateTimeOffset.Now);
+            var granted = spec.ReadWritePaths.ToList();
+
+            CollectionAssert.Contains(granted, music);
+            CollectionAssert.DoesNotContain(granted, install);
+            CollectionAssert.Contains(granted, box.Paths.Data);
+        }
+        finally
+        {
+            Directory.Delete(drive, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public void RoamingAppDataIsTheBoxs()
+    {
+        using var t = new TestBox();
+        var box = t.Create(TestBox.Config());
+
+        var spec = new LaunchPlanner(Personal, LocalAppData).Plan(box, DateTimeOffset.Now);
+
+        Assert.AreEqual(box.Paths.Roaming, spec.Environment["APPDATA"]);
+        Assert.AreEqual(box.Paths.Profile, spec.Environment["USERPROFILE"]);
+        Assert.AreEqual(box.Paths.Profile, spec.Environment["HOMEDRIVE"] + spec.Environment["HOMEPATH"]);
+        Assert.IsTrue(spec.ReadWritePaths.Any(g => box.Paths.Roaming.StartsWith(g + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private static bool IsSameOrUnder(string path, string ancestor)
+    {
+        path = Path.TrimEndingDirectorySeparator(path);
+        ancestor = Path.TrimEndingDirectorySeparator(ancestor);
+        return path.Equals(ancestor, StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(ancestor + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     [TestMethod]
@@ -153,21 +212,6 @@ public sealed class LaunchPlannerTests
 
         CollectionAssert.DoesNotContain(spec.DeniedPaths.ToList(), drive);
         CollectionAssert.DoesNotContain(spec.DeniedPaths.ToList(), Path.GetDirectoryName(t.Root)!);
-    }
-
-    [TestMethod]
-    public void RestOfWinBoxIsDeniedWhenAGrantedDriveHoldsIt()
-    {
-        using var t = new TestBox();
-        var box = t.Create(TestBox.Config());
-        var other = t.Create(TestBox.Config());
-        t.Paths.EnsureCreated();
-        var areas = new HostAreas([], [Path.GetPathRoot(t.Root)!], []);
-
-        var spec = new LaunchPlanner(() => areas, LocalAppData, [t.Root]).Plan(box, DateTimeOffset.Now);
-
-        CollectionAssert.Contains(spec.DeniedPaths.ToList(), other.Paths.Root);
-        CollectionAssert.DoesNotContain(spec.DeniedPaths.ToList(), box.Paths.Data);
     }
 
     [TestMethod]

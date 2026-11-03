@@ -10,6 +10,9 @@ public enum ImportStage
     Extracting,
     CheckingCompatibility,
     Finishing,
+
+    /// <summary>The box exists; its package is being registered (see <see cref="Boxes.BoxManager"/>).</summary>
+    Registering,
 }
 
 public sealed record ImportProgress(ImportStage Stage, DownloadProgress? Download = null);
@@ -20,6 +23,12 @@ public enum ImportFailure
     StubWithoutRecipe,
     UntrustedPayload,
     NoEntryFound,
+
+    /// <summary>An MSIX or APPX package: Windows installs and isolates those itself.</summary>
+    PackagedApp,
+
+    /// <summary>The installer could not be unpacked (damaged, encrypted, or a variant the tools do not know).</summary>
+    ExtractionFailed,
 }
 
 /// <summary>An import failure the UI can explain. <see cref="Detail"/> carries data, not prose.</summary>
@@ -80,8 +89,13 @@ public sealed class ImportPipeline(
                 throw new ImportException(ImportFailure.UnsupportedFormat, payload.Kind.ToString());
         }
 
-        var extractor = extractors.FirstOrDefault(e => e.CanExtract(payload.Kind))
-            ?? throw new ImportException(
+        if (payload.Kind == InstallerKind.Msix)
+            throw new ImportException(ImportFailure.PackagedApp);
+        var (extractor, kind) = extractors
+            .Select(e => (Extractor: e, Kind: e.Recognize(payload)))
+            .FirstOrDefault(x => x.Kind is not null);
+        if (extractor is null || kind is not { } payloadKind)
+            throw new ImportException(
                 payload.Kind == InstallerKind.PortableExe && recipe is null ? ImportFailure.StubWithoutRecipe : ImportFailure.UnsupportedFormat,
                 payload.Kind.ToString());
 
@@ -92,7 +106,7 @@ public sealed class ImportPipeline(
 
         progress?.Report(new ImportProgress(ImportStage.Extracting));
         var extractRoot = Path.Combine(paths.Root, "_extract");
-        var extraction = await extractor.ExtractAsync(payload.Path, payload.Kind, extractRoot, cancellationToken).ConfigureAwait(false);
+        var extraction = await extractor.ExtractAsync(payload.Path, payloadKind, extractRoot, cancellationToken).ConfigureAwait(false);
         Directory.Delete(paths.App);
         Directory.Move(extraction.AppDirectory, paths.App);
         Directory.Delete(extractRoot, recursive: true);
@@ -100,30 +114,39 @@ public sealed class ImportPipeline(
         progress?.Report(new ImportProgress(ImportStage.CheckingCompatibility));
         RestorePlaceholderNames(paths.App, recipe?.PlaceholderFileNames ?? new Dictionary<string, string>());
         var candidates = FindExecutables(paths.App);
-        var entry = EntryResolver.Resolve(candidates, recipe?.EntryFileName)
+        IReadOnlyList<string> names = [.. recipe is null ? [] : new[] { recipe.DisplayName }, .. EntryResolver.NamesOf(payload), .. EntryResolver.NamesOf(dropped)];
+        var entry = EntryResolver.Resolve(candidates, recipe?.EntryFileName, extraction.EntryHints, names)
             ?? throw new ImportException(ImportFailure.NoEntryFound);
+        var arguments = recipe?.LaunchArguments ?? (entry.Chromium ? ChromiumApp.LaunchArguments : []);
 
         var issues = new List<CompatibilityIssue>();
-        if (payload.Kind is InstallerKind.InnoSetup or InstallerKind.Nsis or InstallerKind.Msi)
+        var installer = payloadKind is InstallerKind.InnoSetup or InstallerKind.Nsis or InstallerKind.Msi or InstallerKind.Squirrel
+            || (payloadKind == InstallerKind.SevenZip && payload.Executable is not null);
+        if (installer)
             issues.Add(new CompatibilityIssue(IssueCode.InstallerScriptsSkipped, IssueSeverity.Info));
         if (extraction.SkippedRoots.Count > 0)
             issues.Add(new CompatibilityIssue(IssueCode.FilesOutsideAppSkipped, IssueSeverity.Info, string.Join(";", extraction.SkippedRoots)));
+        if (payloadKind == InstallerKind.Squirrel)
+            issues.Add(new CompatibilityIssue(IssueCode.SelfUpdaterDisabled, IssueSeverity.Info, "Squirrel"));
         if (recipe is not null)
             issues.AddRange(recipe.KnownIssues.Where(k => !issues.Any(i => i.Code == k.Code)));
+        if (arguments.Contains(ChromiumApp.LaunchArguments[0]))
+            issues.Add(new CompatibilityIssue(IssueCode.InnerSandboxDisabled, IssueSeverity.Info));
 
         progress?.Report(new ImportProgress(ImportStage.Finishing));
         var config = new BoxConfig
         {
             Id = id,
-            Name = recipe?.DisplayName ?? entry.Info?.FileDescription ?? entry.Info?.ProductName ?? Path.GetFileNameWithoutExtension(entry.RelativePath),
-            Publisher = entry.Info?.CompanyName ?? payload.Executable?.CompanyName,
-            Version = entry.Info?.ProductVersion ?? payload.Executable?.ProductVersion,
+            Name = recipe?.DisplayName ?? NonBlank(entry.Info?.FileDescription) ?? NonBlank(entry.Info?.ProductName)
+                ?? names.FirstOrDefault() ?? Path.GetFileNameWithoutExtension(entry.RelativePath),
+            Publisher = NonBlank(entry.Info?.CompanyName) ?? NonBlank(payload.Executable?.CompanyName),
+            Version = NonBlank(entry.Info?.ProductVersion) ?? NonBlank(payload.Executable?.ProductVersion),
             Entry = entry.RelativePath,
-            LaunchArguments = recipe?.LaunchArguments ?? [],
+            LaunchArguments = arguments,
             Source = new BoxSource
             {
                 FileName = dropped.FileName,
-                Kind = payloadSource is null ? dropped.Kind : InstallerKind.Stub,
+                Kind = payloadSource is null ? payloadKind : InstallerKind.Stub,
                 Sha256 = Sha256Of(payload.Path),
                 RecipeId = recipe?.Id,
                 DownloadUrl = payloadSource?.Url.ToString(),
@@ -135,16 +158,19 @@ public sealed class ImportPipeline(
     }
 
     /// <summary>
-    /// Inno Setup scripts can compute file names at install time ("code$GetAppExeDestName"). innoextract
-    /// writes those literally; the real name is recoverable from the file's PE OriginalFilename, or else
-    /// from the recipe.
+    /// Inno Setup scripts can compute file names at install time ("{code_GetAppExeDestName}"), which the unpacker
+    /// writes literally. Names the installer's own shortcuts give are restored while unpacking; for the rest, the
+    /// real name comes from the recipe, or else from the file's PE OriginalFilename.
     /// </summary>
     private void RestorePlaceholderNames(string appDirectory, IReadOnlyDictionary<string, string> recipeNames)
     {
-        foreach (var file in Directory.EnumerateFiles(appDirectory, "code$*", SearchOption.AllDirectories).ToList())
+        var placeholders = Directory.EnumerateFiles(appDirectory, "*", SearchOption.AllDirectories)
+            .Where(f => InstallerLayout.PlaceholderName(Path.GetFileName(f)) is not null)
+            .ToList();
+        foreach (var file in placeholders)
         {
-            var original = inspector.ReadExecutableInfo(file)?.OriginalFilename
-                ?? recipeNames.GetValueOrDefault(Path.GetFileName(file));
+            var function = InstallerLayout.PlaceholderName(Path.GetFileName(file))!;
+            var original = recipeNames.GetValueOrDefault(function) ?? inspector.ReadExecutableInfo(file)?.OriginalFilename;
             if (string.IsNullOrWhiteSpace(original) || original.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
                 continue;
             var target = Path.Combine(Path.GetDirectoryName(file)!, original);
@@ -155,8 +181,15 @@ public sealed class ImportPipeline(
 
     private List<ExecutableCandidate> FindExecutables(string appDirectory) =>
         Directory.EnumerateFiles(appDirectory, "*.exe", SearchOption.AllDirectories)
-            .Select(f => new ExecutableCandidate(Path.GetRelativePath(appDirectory, f), new FileInfo(f).Length, inspector.ReadExecutableInfo(f)))
+            .Select(f => new ExecutableCandidate(
+                Path.GetRelativePath(appDirectory, f),
+                new FileInfo(f).Length,
+                inspector.ReadExecutableInfo(f),
+                PeFile.IsGui(f),
+                ChromiumApp.IsMainProgram(f)))
             .ToList();
+
+    private static string? NonBlank(string? text) => string.IsNullOrWhiteSpace(text) ? null : text.Trim();
 
     private static string Sha256Of(string path)
     {
