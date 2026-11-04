@@ -19,8 +19,8 @@ try
         ["list"] => List(),
         ["import", var file, .. var flags] when flags.All(f => f is "--no-package" or "--anyway") =>
             await Import(file, register: !flags.Contains("--no-package"), anyway: flags.Contains("--anyway")),
-        ["update", var box, var file, .. var flags] when flags.All(f => f is "--anyway") =>
-            await Update(box, file, anyway: flags.Contains("--anyway")),
+        ["update", var box, var file, .. var flags] when flags.All(f => f is "--anyway" or "--older") =>
+            await Update(box, file, anyway: flags.Contains("--anyway"), older: flags.Contains("--older")),
         ["package", var box] => await Package(box),
         ["run", var box, ..] => await Run(box, args.Skip(2).ToArray()),
         ["stop", var box] => Stop(box),
@@ -57,9 +57,10 @@ int Usage()
                                    create a box from an installer (stubs are resolved through recipes)
                                    and register its package. An app WinBox expects not to run in a box
                                    (measured, or asking for administrator rights) is only imported with --anyway
-          update <id|name> <installer> [--anyway]
+          update <id|name> <installer> [--anyway] [--older]
                                    put the app the installer brings in the box's place; its data, settings
-                                   and package stay. Refused while the box runs, or for another app
+                                   and package stay. Refused while the box runs, or for another app; an
+                                   older version than the box has only with --older
           package <id|name>        (re)register the box's MSIX package
           run <id|name> [options]  launch a box inside its package. Options ({data} = the box's Data dir):
                 --seconds N   stop it after N seconds
@@ -160,10 +161,16 @@ IProgress<ImportProgress> PrintProgress()
     });
 }
 
-async Task<int> Update(string key, string file, bool anyway)
+async Task<int> Update(string key, string file, bool anyway, bool older)
 {
     var box = Find(key);
-    var updated = await host.Manager.UpdateAsync(box, file, PrintProgress(), ConfirmUnless(anyway));
+    var updated = await host.Manager.UpdateAsync(box, file, PrintProgress(), ConfirmUnless(anyway), (current, incoming, _) =>
+    {
+        Console.WriteLine($"older than the box's app: {incoming.Version} (the box has {current.Config.Version})");
+        if (!older)
+            Console.Error.WriteLine("not updated; pass --older to put the older version in all the same");
+        return Task.FromResult(older);
+    });
     Console.WriteLine($"updated {updated.Config.Name} {box.Config.Version} -> {updated.Config.Version} in {updated.Paths.Root}");
     Console.WriteLine($"entry: {updated.Config.Entry}  args: {string.Join(' ', updated.Config.LaunchArguments)}");
     foreach (var issue in updated.Config.Issues)

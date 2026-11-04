@@ -264,6 +264,72 @@ public sealed class BoxUpdateTests
     }
 
     [TestMethod]
+    public async Task AnOlderVersionIsRefusedUnlessTheCallerAgrees()
+    {
+        var box = await ImportedTool("2.0.0");
+
+        var unasked = await Assert.ThrowsExactlyAsync<ImportException>(() => Manager().UpdateAsync(box, Installer("1.0.0")));
+        var declined = await Assert.ThrowsExactlyAsync<ImportException>(() =>
+            Manager().UpdateAsync(box, Installer("1.0.0"), confirmDowngrade: (_, _, _) => Task.FromResult(false)));
+
+        Assert.AreEqual(ImportFailure.OlderVersion, unasked.Failure);
+        Assert.AreEqual(ImportFailure.OlderVersion, declined.Failure);
+        Assert.AreEqual("1.0.0", declined.Detail);
+        Assert.AreEqual("2.0.0", VersionIn(box));
+        Assert.AreEqual("2.0.0", _t.Store.Reload(box.Paths)!.Config.Version);
+        AssertNothingLeftOver(box);
+    }
+
+    [TestMethod]
+    public async Task AnOlderVersionTheCallerAgreesToKeepsTheData()
+    {
+        var box = await ImportedTool("2.0.0");
+        (string? Has, string? Brings)? asked = null;
+
+        var updated = await Manager().UpdateAsync(box, Installer("1.0.0"), confirmDowngrade: (current, incoming, _) =>
+        {
+            asked = (current.Config.Version, incoming.Version);
+            return Task.FromResult(true);
+        });
+
+        Assert.AreEqual(("2.0.0", "1.0.0"), asked);
+        Assert.AreEqual("1.0.0", updated.Config.Version);
+        Assert.AreEqual("1.0.0", VersionIn(updated));
+        AssertDataKept(updated);
+        AssertNothingLeftOver(updated);
+    }
+
+    [TestMethod]
+    [DataRow("1.0.0")]
+    [DataRow("2.0.0")]
+    public async Task TheSameOrANewerVersionIsNotAskedAbout(string version)
+    {
+        var box = await ImportedTool("1.0.0");
+
+        var updated = await Manager().UpdateAsync(box, Installer(version), confirmDowngrade: (_, _, _) => throw new AssertFailedException("asked"));
+
+        Assert.AreEqual(version, VersionIn(updated));
+    }
+
+    [TestMethod]
+    public async Task ARunningBoxIsNotAskedAboutAnOlderVersion()
+    {
+        var box = await ImportedTool("2.0.0");
+        _runner.Running.Add(box.Config.Id);
+        var asked = false;
+
+        await Assert.ThrowsExactlyAsync<BoxBusyException>(() => Manager().UpdateAsync(box, Installer("1.0.0"), confirmDowngrade: (_, _, _) =>
+        {
+            asked = true;
+            return Task.FromResult(true);
+        }));
+
+        Assert.IsFalse(asked);
+        Assert.AreEqual("2.0.0", VersionIn(box));
+        AssertNothingLeftOver(box);
+    }
+
+    [TestMethod]
     public async Task AnUpdateMayMoveTheProgram()
     {
         var box = await ImportedTool("1.0.0");

@@ -518,18 +518,30 @@ internal sealed class LibraryPage : Component
     private static Element ImportCard(ImportJob job, Action dismiss, Action cancel, Action addAnyway, Action update, Action addNew)
     {
         // The library has a box of the app already: updating it is what the user most likely dropped it in for.
+        // Going back to an older version never is: the box's data may be past what that version reads, and an old
+        // installer is often dropped by mistake. Cancel then takes the accent and the place of Update, so a click
+        // out of habit changes nothing.
         if (job.Offer is { } offer)
+        {
+            var older = Button("换成旧版本", update).AutomationName($"换成旧版本{job.FileName}");
+            var addNewBox = Button("另建一个盒子", addNew).AutomationName($"另建一个盒子{job.FileName}");
+            var buttons = !offer.Older
+                ? HStack(8,
+                    Button("取消", cancel).AutomationName($"取消添加{job.FileName}"),
+                    addNewBox,
+                    Button("更新盒子", update).AccentButton().AutomationName($"更新盒子{job.FileName}"))
+                : offer.Picked
+                    ? HStack(8, older, Button("取消", cancel).AccentButton().AutomationName($"取消添加{job.FileName}"))
+                    : HStack(8, older, addNewBox, Button("取消", cancel).AccentButton().AutomationName($"取消添加{job.FileName}"));
             return Card((FlexRow(
-                    Glyph(UpdateGlyph, 24),
+                    Glyph(offer.Older ? WarningGlyph : UpdateGlyph, 24, offer.Older ? Theme.SystemCaution : null),
                     VStack(4,
                         BodyStrong(Texts.UpdateOfferTitle(offer)),
                         Body(Texts.UpdateOffer(offer)).TextWrapping()
                     ).Flex(grow: 1, basis: 0),
-                    HStack(8,
-                        Button("取消", cancel).AutomationName($"取消添加{job.FileName}"),
-                        Button("另建一个盒子", addNew).AutomationName($"另建一个盒子{job.FileName}"),
-                        Button("更新盒子", update).AccentButton().AutomationName($"更新盒子{job.FileName}")))
+                    buttons)
                 with { ColumnGap = 16, AlignItems = FlexAlign.Center }));
+        }
 
         if (job.Done is { } done)
             return Card((FlexRow(

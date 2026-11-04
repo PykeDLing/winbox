@@ -38,6 +38,12 @@ public enum ImportFailure
 
     /// <summary>The installer was picked to update a box, but brings another app (named in the detail); the box is left as it was.</summary>
     NotTheSameApp,
+
+    /// <summary>
+    /// The installer picked to update a box brings an older version of its app (in the detail), and the caller chose
+    /// not to go back to it (see <see cref="Boxes.DowngradeConfirmation"/>); the box is left as it was.
+    /// </summary>
+    OlderVersion,
 }
 
 /// <summary>

@@ -38,7 +38,9 @@ public static class Texts
         ? job.Failed ? $"没能用 {job.FileName} 更新“{box}”" : $"正在用 {job.FileName} 更新“{box}”"
         : job.Failed ? $"没能添加 {job.FileName}" : $"正在添加 {job.FileName}";
 
-    public static string UpdateOfferTitle(UpdateOffer offer) => $"“{offer.Box.Config.Name}”已经在应用库里了";
+    public static string UpdateOfferTitle(UpdateOffer offer) => offer.Picked
+        ? $"要把“{offer.Box.Config.Name}”换成旧版本吗？"
+        : $"“{offer.Box.Config.Name}”已经在应用库里了";
 
     /// <summary>What updating the box would do, for the card that asks.</summary>
     public static string UpdateOffer(UpdateOffer offer)
@@ -51,13 +53,21 @@ public static class Texts
             VersionChange.Older => $"安装包里是旧版本 {incoming}，盒子里是 {current}。",
             _ => "",
         };
-        return versions + "更新盒子会换上安装包里的程序，登录信息、设置和数据都保留。"
-            + (offer.Running ? "它正在运行，更新前会先请它保存并退出。" : "")
-            + (offer.Count > 1 ? $"这样的盒子有 {offer.Count} 个，更新的是{Added(offer.Box.Config.CreatedAt)}的那个。" : "");
+        // Going back keeps the data as the newer version left it, which the older one may not read; a box of its own
+        // is the way to try an older version.
+        var what = offer.Older
+            ? "换成旧版本会保留登录信息、设置和数据，但新版本可能已经把它们改成旧版本读不了的样子，有的软件也不让旧版本登录。"
+                + (offer.Picked ? "只想试试旧版本，可以把安装包拖进窗口，另建一个盒子。" : "只想试试旧版本，可以另建一个盒子。")
+            : "更新盒子会换上安装包里的程序，登录信息、设置和数据都保留。";
+        return versions + what
+            + (offer.Running ? offer.Older ? "它正在运行，换之前会先请它保存并退出。" : "它正在运行，更新前会先请它保存并退出。" : "")
+            + (offer.Count > 1 ? $"这样的盒子有 {offer.Count} 个，{(offer.Older ? "换" : "更新")}的是{Added(offer.Box.Config.CreatedAt)}的那个。" : "");
     }
 
-    public static string Updated(BoxConfig config) => string.IsNullOrWhiteSpace(config.Version)
-        ? $"已更新“{config.Name}”，登录信息和数据都在"
+    /// <summary>What an update did; <paramref name="previous"/> is the version the box had.</summary>
+    public static string Updated(BoxConfig config, string? previous) =>
+        string.IsNullOrWhiteSpace(config.Version) ? $"已更新“{config.Name}”，登录信息和数据都在"
+        : BoxUpdate.Compare(previous, config.Version) == VersionChange.Older ? $"已把“{config.Name}”换成旧版本 {config.Version}，登录信息和数据都在"
         : $"已把“{config.Name}”更新到 {config.Version}，登录信息和数据都在";
 
     public const string UpdateWhileBusy = "它正在运行。请先退出它，再更新";
@@ -121,6 +131,7 @@ public static class Texts
         ImportFailure.ExtractionFailed => $"没能解开这个安装包（可能已损坏或加了密）{Detail(detail)}",
         ImportFailure.Declined => "没有添加：它可能无法在盒子里运行",
         ImportFailure.NotTheSameApp => $"这个安装包里是“{detail}”，不是这个盒子里的软件。盒子没有改动",
+        ImportFailure.OlderVersion => $"这个安装包里是旧版本{Detail(detail)}。盒子没有改动",
         _ => failure.ToString(),
     };
 

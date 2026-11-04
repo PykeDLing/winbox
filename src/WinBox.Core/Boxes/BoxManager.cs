@@ -27,6 +27,13 @@ public sealed record ImportedBox(LoadedBox Box, Exception? RegistrationError)
 /// </summary>
 public delegate Task<LoadedBox?> UpdateChoice(IReadOnlyList<LoadedBox> boxes, BoxConfig incoming, CancellationToken cancellationToken);
 
+/// <summary>
+/// Asked before <paramref name="box"/> is given an older version of its app (<see cref="VersionChange.Older"/>) than
+/// it has: true goes on, false leaves the box as it is. The box's data stays as the newer version left it, and an
+/// older version may not read it.
+/// </summary>
+public delegate Task<bool> DowngradeConfirmation(LoadedBox box, BoxConfig incoming, CancellationToken cancellationToken);
+
 public sealed record RunOptions
 {
     /// <summary>Changes the planned launch (the CLI's diagnostics).</summary>
@@ -120,16 +127,29 @@ public sealed class BoxManager(
     /// (<see cref="BoxUpdate.MayUpdate"/>; <see cref="ImportFailure.NotTheSameApp"/> otherwise). Refused while the box
     /// runs: the user quits it first.
     /// </summary>
+    /// <param name="confirmDowngrade">
+    /// Asked when the installer brings an older version than the box has. Without it, such an installer is refused
+    /// (<see cref="ImportFailure.OlderVersion"/>).
+    /// </param>
     public async Task<LoadedBox> UpdateAsync(
         LoadedBox box,
         string file,
         IProgress<ImportProgress>? progress = null,
         ImportConfirmation? confirm = null,
+        DowngradeConfirmation? confirmDowngrade = null,
         CancellationToken cancellationToken = default)
     {
         using var prepared = await import.PrepareAsync(file, progress, confirm, cancellationToken).ConfigureAwait(false);
         if (!BoxUpdate.MayUpdate(box.Config, prepared.Config))
             throw new ImportException(ImportFailure.NotTheSameApp, prepared.Config.Name);
+        if (BoxUpdate.Compare(box.Config.Version, prepared.Config.Version) == VersionChange.Older)
+        {
+            // Not worth asking about a box that would be refused for running anyway.
+            if (runner.IsRunning(box))
+                throw new BoxBusyException(box.Config.Id, BoxBusyReason.Running);
+            if (confirmDowngrade is null || !await confirmDowngrade(box, prepared.Config, cancellationToken).ConfigureAwait(false))
+                throw new ImportException(ImportFailure.OlderVersion, prepared.Config.Version);
+        }
         return await ReplaceAppAsync(box, prepared, quitFirst: false, progress, cancellationToken).ConfigureAwait(false);
     }
 

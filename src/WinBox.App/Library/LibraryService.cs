@@ -63,7 +63,15 @@ public sealed record ImportJob(Guid Key, string FileName, ImportStep Step, Downl
 }
 
 /// <summary>An installer of an app the library has a box of: <see cref="Box"/>, the oldest of <see cref="Count"/> such boxes.</summary>
-public sealed record UpdateOffer(LoadedBox Box, int Count, BoxConfig Incoming, bool Running);
+/// <param name="Picked">
+/// The user picked the box from its menu to update, and is asked only because the installer is older: adding a new
+/// box instead is not on offer.
+/// </param>
+public sealed record UpdateOffer(LoadedBox Box, int Count, BoxConfig Incoming, bool Running, bool Picked = false)
+{
+    /// <summary>The installer would take the box back to an older version of its app.</summary>
+    public bool Older => BoxUpdate.Compare(Box.Config.Version, Incoming.Version) == VersionChange.Older;
+}
 
 /// <summary>Import progress as the library shows it: the pipeline's stages plus registering the box's package.</summary>
 public enum ImportStep
@@ -384,6 +392,8 @@ public sealed class LibraryService : IDisposable
     {
         // The box the installer updates, once that is settled: while its app is swapped, nothing else is done to it.
         var updating = target?.Config.Id;
+        // The version it had, for the card that says what it has now.
+        var previous = target?.Config.Version;
 
         void Update(Func<ImportJob, ImportJob> change)
         {
@@ -442,9 +452,32 @@ public sealed class LibraryService : IDisposable
                 AppLog.Write($"importing {job.FileName}: {(update ? "updating the box" : "adding a new box")}");
                 if (!update)
                     return null;
-                updating = box.Config.Id;
+                (updating, previous) = (box.Config.Id, box.Config.Version);
                 Update(j => j with { Target = box.Config.Name });
                 return box;
+            }
+            finally
+            {
+                lock (_lock)
+                    _updateAnswers.Remove(job.Key);
+                Update(j => j with { Offer = null });
+            }
+        }
+
+        // An update picked from the box's menu asks only when it would go back to an older version. Its card's Cancel
+        // calls the update off, as it does any import.
+        async Task<bool> ConfirmDowngrade(LoadedBox box, BoxConfig incoming, CancellationToken token)
+        {
+            var answer = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (_lock)
+                _updateAnswers[job.Key] = answer;
+            AppLog.Write($"updating {box.Config.Id:N} with {job.FileName}: {incoming.Version} is older than {box.Config.Version}; asking whether to go back");
+            Update(j => j with { Offer = new UpdateOffer(box, 1, incoming, Running: false, Picked: true) });
+            try
+            {
+                var back = await answer.Task.WaitAsync(token);
+                AppLog.Write($"updating {box.Config.Id:N} with {job.FileName}: {(back ? "going back" : "not going back")}");
+                return back;
             }
             finally
             {
@@ -471,7 +504,7 @@ public sealed class LibraryService : IDisposable
                 (box, registrationError, updated) = (imported.Box, imported.RegistrationError, imported.Updated);
             }
             else
-                box = await _host.Manager.UpdateAsync(target, file, progress, Confirm, cancel.Token);
+                box = await _host.Manager.UpdateAsync(target, file, progress, Confirm, ConfirmDowngrade, cancel.Token);
             lock (_lock)
             {
                 if (updated)
@@ -494,7 +527,7 @@ public sealed class LibraryService : IDisposable
             await ExtractIconAsync(box);
             // The new app is in the box and the box is free again: the card says so until it is closed.
             if (updated)
-                Update(j => j with { Done = Texts.Updated(box.Config), Updated = box.Config.Id });
+                Update(j => j with { Done = Texts.Updated(box.Config, previous), Updated = box.Config.Id });
         }
         catch (OperationCanceledException) when (cancel.IsCancellationRequested)
         {
