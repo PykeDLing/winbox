@@ -13,6 +13,9 @@ public enum ImportStage
 
     /// <summary>The box exists; its package is being registered (see <see cref="Boxes.BoxManager"/>).</summary>
     Registering,
+
+    /// <summary>The installer's app is taking the place of an existing box's app (see <see cref="Boxes.BoxUpdate"/>).</summary>
+    Updating,
 }
 
 public sealed record ImportProgress(ImportStage Stage, DownloadProgress? Download = null);
@@ -32,6 +35,9 @@ public enum ImportFailure
 
     /// <summary>WinBox expects the app not to run in a box, and the caller chose not to add it (see <see cref="ImportConfirmation"/>).</summary>
     Declined,
+
+    /// <summary>The installer was picked to update a box, but brings another app (named in the detail); the box is left as it was.</summary>
+    NotTheSameApp,
 }
 
 /// <summary>
@@ -41,6 +47,31 @@ public enum ImportFailure
 /// files say, and never twice about the same thing.
 /// </summary>
 public delegate Task<bool> ImportConfirmation(IReadOnlyList<CompatibilityIssue> blockers, CancellationToken cancellationToken);
+
+/// <summary>
+/// An import unpacked and checked but not in the library yet: <see cref="Commit"/> adds it as a new box, or its app
+/// updates an existing one (<see cref="BoxStore.ReplaceApp"/>). Disposing it without either deletes it.
+/// </summary>
+public sealed class PreparedImport : IDisposable
+{
+    private readonly ImportStaging _staging;
+
+    internal PreparedImport(ImportStaging staging, BoxConfig config)
+    {
+        _staging = staging;
+        Config = config;
+    }
+
+    /// <summary>The box.json of the box it would make.</summary>
+    public BoxConfig Config { get; }
+
+    /// <summary>Where it waits: its App\ and Source\ are what an update takes.</summary>
+    public BoxPaths Paths => _staging.Paths;
+
+    public LoadedBox Commit() => _staging.Commit(Config);
+
+    public void Dispose() => _staging.Dispose();
+}
 
 /// <summary>An import failure the UI can explain. <see cref="Detail"/> carries data, not prose.</summary>
 public sealed class ImportException(ImportFailure failure, string? detail = null, Exception? inner = null)
@@ -85,11 +116,26 @@ public sealed class ImportPipeline(
         };
     }
 
+    /// <summary>Imports <paramref name="droppedFile"/> as a new box.</summary>
     /// <param name="confirm">
     /// Asked when WinBox expects the app not to run in a box; without it the import goes on, and the reasons are
     /// recorded in the box's issues all the same.
     /// </param>
     public async Task<LoadedBox> ImportAsync(
+        string droppedFile,
+        IProgress<ImportProgress>? progress = null,
+        ImportConfirmation? confirm = null,
+        CancellationToken cancellationToken = default)
+    {
+        using var prepared = await PrepareAsync(droppedFile, progress, confirm, cancellationToken).ConfigureAwait(false);
+        return prepared.Commit();
+    }
+
+    /// <summary>
+    /// Does all of an import but adding the box to the library: the result is committed as a new box, or its app
+    /// updates an existing box (<see cref="BoxStore.ReplaceApp"/>).
+    /// </summary>
+    public async Task<PreparedImport> PrepareAsync(
         string droppedFile,
         IProgress<ImportProgress>? progress = null,
         ImportConfirmation? confirm = null,
@@ -140,70 +186,79 @@ public sealed class ImportPipeline(
                 payload.Kind.ToString());
 
         var id = Guid.NewGuid();
-        using var staging = store.BeginImport(id);
-        var paths = staging.Paths;
-        File.Copy(dropped.Path, Path.Combine(paths.Source, dropped.FileName));
-
-        progress?.Report(new ImportProgress(ImportStage.Extracting));
-        var extractRoot = Path.Combine(paths.Root, "_extract");
-        var extraction = await extractor.ExtractAsync(payload.Path, payloadKind, extractRoot, cancellationToken).ConfigureAwait(false);
-
-        progress?.Report(new ImportProgress(ImportStage.CheckingCompatibility));
-        // Everything unpacked, before what is not the app goes: a driver the installer would put in System32 counts.
-        var carried = CompatibilityCheck.ScanFiles(extractRoot);
-        Directory.Delete(paths.App);
-        Directory.Move(extraction.AppDirectory, paths.App);
-        Directory.Delete(extractRoot, recursive: true);
-
-        RestorePlaceholderNames(paths.App, recipe?.PlaceholderFileNames ?? new Dictionary<string, string>());
-        var candidates = FindExecutables(paths.App);
-        IReadOnlyList<string> names = [.. recipe is null ? [] : new[] { recipe.DisplayName }, .. EntryResolver.NamesOf(payload), .. EntryResolver.NamesOf(dropped)];
-        var entry = EntryResolver.Resolve(candidates, recipe?.EntryFileName, extraction.EntryHints, names)
-            ?? throw new ImportException(ImportFailure.NoEntryFound);
-        var arguments = recipe?.LaunchArguments ?? (entry.Chromium ? ChromiumApp.LaunchArguments : []);
-
-        var entryPath = Path.Combine(paths.App, entry.RelativePath);
-        await CheckAsync([
-            CompatibilityCheck.CheckEntry(entryPath, administratorAccount),
-            CompatibilityCheck.Known(entry.RelativePath, entry.Info, () => inspector.ReadSignature(entryPath).CommonName),
-            .. carried,
-        ]).ConfigureAwait(false);
-
-        var installer = payloadKind is InstallerKind.InnoSetup or InstallerKind.Nsis or InstallerKind.Msi or InstallerKind.Squirrel
-            || (payloadKind == InstallerKind.SevenZip && payload.Executable is not null);
-        if (installer)
-            issues.Add(new CompatibilityIssue(IssueCode.InstallerScriptsSkipped, IssueSeverity.Info));
-        if (extraction.SkippedRoots.Count > 0)
-            issues.Add(new CompatibilityIssue(IssueCode.FilesOutsideAppSkipped, IssueSeverity.Info, string.Join(";", extraction.SkippedRoots)));
-        if (payloadKind == InstallerKind.Squirrel)
-            issues.Add(new CompatibilityIssue(IssueCode.SelfUpdaterDisabled, IssueSeverity.Info, "Squirrel"));
-        if (recipe is not null)
-            issues.AddRange(recipe.KnownIssues.Where(k => !issues.Any(i => i.Code == k.Code)));
-        if (arguments.Contains(ChromiumApp.LaunchArguments[0]))
-            issues.Add(new CompatibilityIssue(IssueCode.InnerSandboxDisabled, IssueSeverity.Info));
-
-        progress?.Report(new ImportProgress(ImportStage.Finishing));
-        var config = new BoxConfig
+        var staging = store.BeginImport(id);
+        try
         {
-            Id = id,
-            Name = recipe?.DisplayName ?? NonBlank(entry.Info?.FileDescription) ?? NonBlank(entry.Info?.ProductName)
-                ?? names.FirstOrDefault() ?? Path.GetFileNameWithoutExtension(entry.RelativePath),
-            Publisher = NonBlank(entry.Info?.CompanyName) ?? NonBlank(payload.Executable?.CompanyName),
-            Version = NonBlank(entry.Info?.ProductVersion) ?? NonBlank(payload.Executable?.ProductVersion),
-            Entry = entry.RelativePath,
-            LaunchArguments = arguments,
-            Source = new BoxSource
+            var paths = staging.Paths;
+            File.Copy(dropped.Path, Path.Combine(paths.Source, dropped.FileName));
+
+            progress?.Report(new ImportProgress(ImportStage.Extracting));
+            var extractRoot = Path.Combine(paths.Root, "_extract");
+            var extraction = await extractor.ExtractAsync(payload.Path, payloadKind, extractRoot, cancellationToken).ConfigureAwait(false);
+
+            progress?.Report(new ImportProgress(ImportStage.CheckingCompatibility));
+            // Everything unpacked, before what is not the app goes: a driver the installer would put in System32 counts.
+            var carried = CompatibilityCheck.ScanFiles(extractRoot);
+            Directory.Delete(paths.App);
+            Directory.Move(extraction.AppDirectory, paths.App);
+            Directory.Delete(extractRoot, recursive: true);
+
+            RestorePlaceholderNames(paths.App, recipe?.PlaceholderFileNames ?? new Dictionary<string, string>());
+            var candidates = FindExecutables(paths.App);
+            IReadOnlyList<string> names = [.. recipe is null ? [] : new[] { recipe.DisplayName }, .. EntryResolver.NamesOf(payload), .. EntryResolver.NamesOf(dropped)];
+            var entry = EntryResolver.Resolve(candidates, recipe?.EntryFileName, extraction.EntryHints, names)
+                ?? throw new ImportException(ImportFailure.NoEntryFound);
+            var arguments = recipe?.LaunchArguments ?? (entry.Chromium ? ChromiumApp.LaunchArguments : []);
+
+            var entryPath = Path.Combine(paths.App, entry.RelativePath);
+            await CheckAsync([
+                CompatibilityCheck.CheckEntry(entryPath, administratorAccount),
+                CompatibilityCheck.Known(entry.RelativePath, entry.Info, () => inspector.ReadSignature(entryPath).CommonName),
+                .. carried,
+            ]).ConfigureAwait(false);
+
+            var installer = payloadKind is InstallerKind.InnoSetup or InstallerKind.Nsis or InstallerKind.Msi or InstallerKind.Squirrel
+                || (payloadKind == InstallerKind.SevenZip && payload.Executable is not null);
+            if (installer)
+                issues.Add(new CompatibilityIssue(IssueCode.InstallerScriptsSkipped, IssueSeverity.Info));
+            if (extraction.SkippedRoots.Count > 0)
+                issues.Add(new CompatibilityIssue(IssueCode.FilesOutsideAppSkipped, IssueSeverity.Info, string.Join(";", extraction.SkippedRoots)));
+            if (payloadKind == InstallerKind.Squirrel)
+                issues.Add(new CompatibilityIssue(IssueCode.SelfUpdaterDisabled, IssueSeverity.Info, "Squirrel"));
+            if (recipe is not null)
+                issues.AddRange(recipe.KnownIssues.Where(k => !issues.Any(i => i.Code == k.Code)));
+            if (arguments.Contains(ChromiumApp.LaunchArguments[0]))
+                issues.Add(new CompatibilityIssue(IssueCode.InnerSandboxDisabled, IssueSeverity.Info));
+
+            progress?.Report(new ImportProgress(ImportStage.Finishing));
+            var config = new BoxConfig
             {
-                FileName = dropped.FileName,
-                Kind = payloadSource is null ? payloadKind : InstallerKind.Stub,
-                Sha256 = Sha256Of(payload.Path),
-                RecipeId = recipe?.Id,
-                DownloadUrl = payloadSource?.Url.ToString(),
-            },
-            Issues = issues,
-            CreatedAt = _clock.GetUtcNow(),
-        };
-        return staging.Commit(config);
+                Id = id,
+                Name = recipe?.DisplayName ?? NonBlank(entry.Info?.FileDescription) ?? NonBlank(entry.Info?.ProductName)
+                    ?? names.FirstOrDefault() ?? Path.GetFileNameWithoutExtension(entry.RelativePath),
+                Publisher = NonBlank(entry.Info?.CompanyName) ?? NonBlank(payload.Executable?.CompanyName),
+                Version = NonBlank(entry.Info?.ProductVersion) ?? NonBlank(payload.Executable?.ProductVersion),
+                Entry = entry.RelativePath,
+                LaunchArguments = arguments,
+                Source = new BoxSource
+                {
+                    FileName = dropped.FileName,
+                    Kind = payloadSource is null ? payloadKind : InstallerKind.Stub,
+                    Sha256 = Sha256Of(payload.Path),
+                    RecipeId = recipe?.Id,
+                    DownloadUrl = payloadSource?.Url.ToString(),
+                },
+                Issues = issues,
+                CreatedAt = _clock.GetUtcNow(),
+            };
+            return new PreparedImport(staging, config);
+        }
+        catch
+        {
+            // Not committed: the half-made box goes.
+            staging.Dispose();
+            throw;
+        }
     }
 
     /// <summary>

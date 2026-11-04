@@ -32,6 +32,9 @@ public sealed record BoxConfig
     public IReadOnlyList<CompatibilityIssue> Issues { get; init; } = [];
     public required DateTimeOffset CreatedAt { get; init; }
 
+    /// <summary>When an installer last replaced the box's app (see <see cref="BoxUpdate"/>); null until then.</summary>
+    public DateTimeOffset? UpdatedAt { get; init; }
+
     /// <summary>
     /// The box's own MSIX package, registered so Windows redirects the app's new AppData files and HKCU
     /// writes into private package storage. Null until the package is registered.
@@ -90,7 +93,7 @@ public enum IssueCode
     /// <summary>The installer's own scripts ([Run], [Code], registry, shortcuts) were not executed.</summary>
     InstallerScriptsSkipped,
 
-    /// <summary>The installer ships a self-updater that WinBox does not run; WinBox manages updates itself.</summary>
+    /// <summary>The installer ships a self-updater that WinBox does not run; a newer installer updates the box instead.</summary>
     SelfUpdaterDisabled,
 
     /// <summary>The installer drops files outside the app directory (system or common folders) that were not installed.</summary>

@@ -1,0 +1,393 @@
+using WinBox.Core.Boxes;
+using WinBox.Core.Import;
+using WinBox.Core.IO;
+using WinBox.Core.Sandbox;
+
+namespace WinBox.Core.Tests;
+
+[TestClass]
+public sealed class BoxUpdateRuleTests
+{
+    private static BoxConfig App(string entry = "Tool.exe", string name = "Tool", string? publisher = "Tool Co", string? recipe = null) =>
+        TestBox.Config(entry: entry) with
+        {
+            Name = name,
+            Publisher = publisher,
+            Source = new BoxSource { FileName = "setup.exe", Kind = InstallerKind.Nsis, RecipeId = recipe },
+        };
+
+    [TestMethod]
+    public void TheSameProgramUnderTheSameNameOrPublisherIsTheSameApp()
+    {
+        Assert.IsTrue(BoxUpdate.IsSameApp(App(), App(entry: @"app-2.0\tool.exe")));
+        Assert.IsTrue(BoxUpdate.IsSameApp(App(), App(name: "Tool 2")));
+        Assert.IsTrue(BoxUpdate.IsSameApp(App(), App(publisher: "Someone Else")));
+        Assert.IsFalse(BoxUpdate.IsSameApp(App(), App(name: "Tool 2", publisher: "Someone Else")));
+        Assert.IsFalse(BoxUpdate.IsSameApp(App(), App(entry: "Other.exe")));
+        Assert.IsFalse(BoxUpdate.IsSameApp(App(publisher: null), App(name: "Tool 2", publisher: null)));
+    }
+
+    [TestMethod]
+    public void TheSameRecipeIsTheSameApp() =>
+        Assert.IsTrue(BoxUpdate.IsSameApp(App(recipe: "quark-cloud-drive"), App(entry: "other.exe", name: "x", publisher: null, recipe: "quark-cloud-drive")));
+
+    [TestMethod]
+    public void AnUpdateTheUserPicksMayRenameTheProgramOrTheApp()
+    {
+        Assert.IsTrue(BoxUpdate.MayUpdate(App(), App(entry: "Tool2.exe")));
+        Assert.IsTrue(BoxUpdate.MayUpdate(App(), App(name: "Tool 2", publisher: null)));
+        Assert.IsFalse(BoxUpdate.MayUpdate(App(), App(entry: "Obsidian.exe", name: "Obsidian", publisher: "Tool Co")));
+    }
+
+    [TestMethod]
+    [DataRow("7.2.0.800", "7.4.0.818", VersionChange.Newer)]
+    [DataRow("1.15.0.0", "1.15.0", VersionChange.Same)]
+    [DataRow("1.144.1 (user setup)", "1.144.1", VersionChange.Same)]
+    [DataRow("8.9.7.101", "8.10.0", VersionChange.Newer)]
+    [DataRow("2.0", "1.9.9", VersionChange.Older)]
+    [DataRow(null, "1.0", VersionChange.Unknown)]
+    [DataRow("beta", "1.0", VersionChange.Unknown)]
+    public void VersionsCompareByTheirNumbers(string? current, string incoming, VersionChange change) =>
+        Assert.AreEqual(change, BoxUpdate.Compare(current, incoming));
+
+    [TestMethod]
+    public void AnUpdateTakesWhatDescribesTheAppAndKeepsWhatDescribesTheBox()
+    {
+        var package = new BoxPackage("WinBox.Box.1", "WinBox.Box.1_x");
+        var box = App() with { Version = "1.0", Package = package, BlockNetwork = true, LaunchArguments = ["--old"] };
+        var incoming = App(entry: @"app-2.0\Tool.exe", name: "Tool Two") with
+        {
+            Id = Guid.NewGuid(),
+            Version = "2.0",
+            LaunchArguments = ["--no-sandbox"],
+            Issues = [new CompatibilityIssue(IssueCode.InnerSandboxDisabled, IssueSeverity.Info)],
+            CreatedAt = DateTimeOffset.Now,
+        };
+        var now = new DateTimeOffset(2026, 11, 4, 10, 0, 0, TimeSpan.Zero);
+
+        var updated = BoxUpdate.Apply(box, incoming, now);
+
+        Assert.AreEqual(box.Id, updated.Id);
+        Assert.AreEqual("Tool", updated.Name);
+        Assert.AreEqual(box.CreatedAt, updated.CreatedAt);
+        Assert.AreEqual(package, updated.Package);
+        Assert.AreEqual(true, updated.BlockNetwork);
+        Assert.AreEqual("2.0", updated.Version);
+        Assert.AreEqual(@"app-2.0\Tool.exe", updated.Entry);
+        CollectionAssert.AreEqual(new[] { "--no-sandbox" }, updated.LaunchArguments.ToArray());
+        Assert.AreEqual(IssueCode.InnerSandboxDisabled, updated.Issues.Single().Code);
+        Assert.AreEqual(now, updated.UpdatedAt);
+    }
+}
+
+[TestClass]
+public sealed class BoxUpdateTests
+{
+    private TestBox _t = null!;
+    private BoxManagerTests.FakePackages _packages = null!;
+    private BoxManagerTests.FakeRunner _runner = null!;
+    private string _downloads = "";
+
+    /// <summary>What the next installer unpacks to: its files, and the version information of its programs.</summary>
+    private readonly Dictionary<string, ExecutableInfo?> _info = new(StringComparer.OrdinalIgnoreCase);
+    private Action<string> _unpack = _ => { };
+
+    [TestInitialize]
+    public void Create()
+    {
+        _t = new TestBox();
+        _packages = new BoxManagerTests.FakePackages();
+        _runner = new BoxManagerTests.FakeRunner();
+        _downloads = Directory.CreateDirectory(Path.Combine(_t.Root, "dropped")).FullName;
+    }
+
+    [TestCleanup]
+    public void Delete() => _t.Dispose();
+
+    private sealed class Inspector(Dictionary<string, ExecutableInfo?> info) : IFileInspector
+    {
+        public ExecutableInfo? ReadExecutableInfo(string path) => info.GetValueOrDefault(Path.GetFileName(path));
+        public SignatureInfo ReadSignature(string path) => new(false, null);
+    }
+
+    private sealed class Extractor(Func<Action<string>> unpack) : IPackageExtractor
+    {
+        public InstallerKind? Recognize(InstallerFacts facts) => InstallerKind.Nsis;
+
+        public Task<ExtractionResult> ExtractAsync(string installer, InstallerKind kind, string destination, CancellationToken cancellationToken = default)
+        {
+            var app = Directory.CreateDirectory(Path.Combine(destination, "app")).FullName;
+            unpack()(app);
+            return Task.FromResult(new ExtractionResult(app, []));
+        }
+    }
+
+    private BoxManager Manager(TimeSpan? stopWait = null) => new(
+        _t.Paths, _t.Store,
+        new ImportPipeline(_t.Paths, _t.Store, new Inspector(_info), [new Extractor(() => _unpack)], new BoxManagerTests.NoDownloader(), []),
+        _packages, _runner, new BoxManagerTests.FakeGuard(),
+        new LaunchPlanner([], @"C:\Users\test\AppData\Local"),
+        stopWait ?? TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(300));
+
+    /// <summary>An installer of Tool <paramref name="version"/>: Tool.exe, which says it is that version, and a file naming it.</summary>
+    private string Installer(string version, string program = "Tool.exe", string name = "Tool")
+    {
+        _info[program] = new ExecutableInfo(null, name, name, "Tool Co", version);
+        _unpack = app =>
+        {
+            TestPe.Write(Path.Combine(app, program), TestPe.Build());
+            File.WriteAllText(Path.Combine(app, "version.txt"), version);
+        };
+        return TestPe.Write(Path.Combine(_downloads, $"{name.Replace(' ', '_')}_setup_{version}.exe"), TestPe.Build());
+    }
+
+    private async Task<LoadedBox> ImportedTool(string version = "1.0.0")
+    {
+        var (box, _) = await Manager().ImportAsync(Installer(version));
+        // What the app saved in its box: it must survive every update.
+        Directory.CreateDirectory(Path.Combine(box.Paths.Roaming, "Tool"));
+        File.WriteAllText(Path.Combine(box.Paths.Roaming, "Tool", "settings.json"), "{\"signedIn\":true}");
+        Directory.CreateDirectory(box.Paths.LocalAppDataState);
+        File.WriteAllText(Path.Combine(box.Paths.LocalAppDataState, "cache.db"), "state");
+        return _t.Store.Reload(box.Paths)!;
+    }
+
+    private static string VersionIn(LoadedBox box) => File.ReadAllText(Path.Combine(box.Paths.App, "version.txt"));
+
+    private void AssertNothingLeftOver(LoadedBox box)
+    {
+        Assert.IsFalse(Directory.Exists(box.Paths.AppStaging), "App.new left over");
+        Assert.IsFalse(Directory.Exists(box.Paths.AppPrevious), "App.old left over");
+        Assert.IsFalse(File.Exists(box.Paths.UnfinishedMarker), ".unfinished left over");
+        Assert.AreEqual(0, Directory.GetDirectories(_t.Paths.Boxes, "*" + BoxPaths.PartialExtension).Length, "staging left over");
+    }
+
+    private static void AssertDataKept(LoadedBox box)
+    {
+        Assert.AreEqual("{\"signedIn\":true}", File.ReadAllText(Path.Combine(box.Paths.Roaming, "Tool", "settings.json")));
+        Assert.AreEqual("state", File.ReadAllText(Path.Combine(box.Paths.LocalAppDataState, "cache.db")));
+    }
+
+    [TestMethod]
+    public async Task AnInstallerOfAnAppInTheLibraryIsOfferedAsAnUpdateAndKeepsTheData()
+    {
+        var box = await ImportedTool("1.0.0");
+        var registered = await Manager().RegisterAsync(box);
+        BoxConfig? offered = null;
+
+        var imported = await Manager().ImportAsync(Installer("2.0.0"), chooseUpdate: (boxes, incoming, _) =>
+        {
+            offered = incoming;
+            return Task.FromResult<LoadedBox?>(boxes.Single());
+        });
+
+        Assert.IsTrue(imported.Updated);
+        Assert.AreEqual("2.0.0", offered?.Version);
+        var updated = _t.Store.Load().OfType<LoadedBox>().Single();
+        Assert.AreEqual(box.Config.Id, updated.Config.Id);
+        Assert.AreEqual("2.0.0", updated.Config.Version);
+        Assert.AreEqual(registered.Config.Package, updated.Config.Package);
+        Assert.IsNotNull(updated.Config.UpdatedAt);
+        Assert.AreEqual("2.0.0", VersionIn(updated));
+        CollectionAssert.AreEqual(new[] { "Tool_setup_2.0.0.exe" }, Directory.GetFiles(updated.Paths.Source).Select(Path.GetFileName).ToArray());
+        AssertDataKept(updated);
+        AssertNothingLeftOver(updated);
+    }
+
+    [TestMethod]
+    public async Task ChoosingANewBoxLeavesTheOldOneAlone()
+    {
+        var box = await ImportedTool("1.0.0");
+
+        var imported = await Manager().ImportAsync(Installer("2.0.0"), chooseUpdate: (_, _, _) => Task.FromResult<LoadedBox?>(null));
+
+        Assert.IsFalse(imported.Updated);
+        Assert.AreEqual(2, _t.Store.Load().Count);
+        Assert.AreEqual("1.0.0", VersionIn(_t.Store.Reload(box.Paths)!));
+    }
+
+    [TestMethod]
+    public async Task AnotherAppIsNotOffered()
+    {
+        await ImportedTool();
+        var asked = false;
+
+        await Manager().ImportAsync(Installer("1.0", program: "Other.exe", name: "Other"), chooseUpdate: (_, _, _) =>
+        {
+            asked = true;
+            return Task.FromResult<LoadedBox?>(null);
+        });
+
+        Assert.IsFalse(asked);
+        Assert.AreEqual(2, _t.Store.Load().Count);
+    }
+
+    [TestMethod]
+    public async Task ARunningBoxIsQuitBeforeTheUpdateItWasOffered()
+    {
+        var box = await ImportedTool();
+        _runner.Running.Add(box.Config.Id);
+        _runner.StopsWhenAsked = true;
+
+        await Manager(stopWait: TimeSpan.FromSeconds(5)).ImportAsync(Installer("2.0.0"), chooseUpdate: (boxes, _, _) => Task.FromResult<LoadedBox?>(boxes[0]));
+
+        CollectionAssert.Contains(_runner.StopRequests, box.Config.Id);
+        Assert.AreEqual("2.0.0", VersionIn(box));
+    }
+
+    [TestMethod]
+    public async Task AnUpdateThatWasNotOfferedLeavesARunningBoxAlone()
+    {
+        var box = await ImportedTool("1.0.0");
+        _runner.Running.Add(box.Config.Id);
+
+        var busy = await Assert.ThrowsExactlyAsync<BoxBusyException>(() => Manager().UpdateAsync(box, Installer("2.0.0")));
+
+        Assert.AreEqual(BoxBusyReason.Running, busy.Reason);
+        Assert.AreEqual(0, _runner.StopRequests.Count);
+        Assert.AreEqual("1.0.0", VersionIn(box));
+        AssertNothingLeftOver(box);
+    }
+
+    [TestMethod]
+    public async Task AnInstallerOfAnotherAppDoesNotUpdateTheBox()
+    {
+        var box = await ImportedTool("1.0.0");
+
+        var refused = await Assert.ThrowsExactlyAsync<ImportException>(() =>
+            Manager().UpdateAsync(box, Installer("9.0", program: "Obsidian.exe", name: "Obsidian")));
+
+        Assert.AreEqual(ImportFailure.NotTheSameApp, refused.Failure);
+        Assert.AreEqual("Obsidian", refused.Detail);
+        Assert.AreEqual("1.0.0", VersionIn(box));
+        AssertNothingLeftOver(box);
+    }
+
+    [TestMethod]
+    public async Task AnUpdateMayMoveTheProgram()
+    {
+        var box = await ImportedTool("1.0.0");
+        var installer = Installer("2.0.0");
+        var unpack = _unpack;
+        _unpack = app => unpack(Directory.CreateDirectory(Path.Combine(app, "app-2.0.0")).FullName);
+
+        var updated = await Manager().UpdateAsync(box, installer);
+
+        Assert.AreEqual(@"app-2.0.0\Tool.exe", updated.Config.Entry);
+        Assert.IsTrue(File.Exists(Path.Combine(updated.Paths.App, updated.Config.Entry)));
+        AssertDataKept(updated);
+    }
+
+    // A crash at each step of BoxStore.ReplaceApp, and what the next start makes of it.
+
+    private async Task<(LoadedBox Box, BoxConfig Pending)> Interrupted(bool staged, bool pending, bool swapped)
+    {
+        var box = await ImportedTool("1.0.0");
+        var next = box.Config with { Version = "2.0.0", UpdatedAt = DateTimeOffset.Now };
+        if (staged)
+        {
+            Directory.CreateDirectory(box.Paths.AppStaging);
+            File.WriteAllText(Path.Combine(box.Paths.AppStaging, "version.txt"), "2.0.0");
+        }
+        if (pending)
+            JsonFile.Write(box.Paths.UnfinishedMarker, next, WinBoxJson.Files.BoxConfig);
+        if (swapped)
+        {
+            Directory.Move(box.Paths.App, box.Paths.AppPrevious);
+            if (staged)
+                Directory.Move(box.Paths.AppStaging, box.Paths.App);
+        }
+        return (box, next);
+    }
+
+    [TestMethod]
+    public async Task ACrashBeforeTheNewBoxJsonWasWrittenDropsTheNewApp()
+    {
+        var (box, _) = await Interrupted(staged: true, pending: false, swapped: false);
+
+        Assert.AreEqual(UpdateRecovery.RolledBack, BoxStore.FinishInterruptedUpdate(box.Paths));
+
+        Assert.AreEqual("1.0.0", VersionIn(box));
+        Assert.AreEqual("1.0.0", _t.Store.Reload(box.Paths)!.Config.Version);
+        AssertNothingLeftOver(box);
+    }
+
+    [TestMethod]
+    public async Task ACrashBeforeTheSwapPutsNothingInPlace()
+    {
+        var (box, _) = await Interrupted(staged: true, pending: true, swapped: false);
+
+        Assert.AreEqual(UpdateRecovery.RolledBack, BoxStore.FinishInterruptedUpdate(box.Paths));
+
+        Assert.AreEqual("1.0.0", VersionIn(box));
+        Assert.AreEqual("1.0.0", _t.Store.Reload(box.Paths)!.Config.Version);
+        AssertNothingLeftOver(box);
+    }
+
+    [TestMethod]
+    public async Task ACrashHalfwayThroughTheSwapBringsTheOldAppBack()
+    {
+        var (box, _) = await Interrupted(staged: true, pending: true, swapped: true);
+        // Halfway: App went to App.old, App.new did not become App.
+        Directory.Move(box.Paths.App, box.Paths.AppStaging);
+        Assert.IsFalse(Directory.Exists(box.Paths.App));
+
+        Assert.AreEqual(UpdateRecovery.RolledBack, BoxStore.FinishInterruptedUpdate(box.Paths));
+
+        Assert.AreEqual("1.0.0", VersionIn(box));
+        Assert.AreEqual("1.0.0", _t.Store.Reload(box.Paths)!.Config.Version);
+        AssertNothingLeftOver(box);
+    }
+
+    [TestMethod]
+    public async Task ACrashAfterTheSwapFinishesTheUpdate()
+    {
+        var (box, pending) = await Interrupted(staged: true, pending: true, swapped: true);
+
+        Assert.AreEqual(UpdateRecovery.Finished, BoxStore.FinishInterruptedUpdate(box.Paths));
+
+        Assert.AreEqual("2.0.0", VersionIn(box));
+        Assert.AreEqual(pending.Version, _t.Store.Reload(box.Paths)!.Config.Version);
+        AssertNothingLeftOver(box);
+    }
+
+    [TestMethod]
+    public async Task AReplacedAppLeftBehindIsDeleted()
+    {
+        var box = await ImportedTool("1.0.0");
+        Directory.CreateDirectory(box.Paths.AppPrevious);
+        File.WriteAllText(Path.Combine(box.Paths.AppPrevious, "version.txt"), "0.9");
+
+        Assert.AreEqual(UpdateRecovery.CleanedUp, BoxStore.FinishInterruptedUpdate(box.Paths));
+
+        Assert.AreEqual("1.0.0", VersionIn(box));
+        AssertNothingLeftOver(box);
+    }
+
+    [TestMethod]
+    public async Task InterruptedUpdatesAreFoundAndSettledAtStartup()
+    {
+        var (box, _) = await Interrupted(staged: true, pending: true, swapped: true);
+        await ImportedTool();
+
+        var settled = await Manager().FinishInterruptedUpdatesAsync();
+
+        Assert.AreEqual((box.Config.Id, UpdateRecovery.Finished), settled.Single());
+        Assert.AreEqual(0, _t.Store.InterruptedUpdates().Count);
+    }
+
+    [TestMethod]
+    public async Task ABoxIsStartedOnlyOnceAnInterruptedUpdateIsSettled()
+    {
+        var (box, _) = await Interrupted(staged: true, pending: true, swapped: true);
+        await Manager().RegisterAsync(box);
+
+        var run = Manager().RunAsync(_t.Store.Reload(box.Paths)!);
+        await _runner.Started(box.Config.Id);
+        _runner.Finish(box.Config.Id);
+        await run;
+
+        Assert.AreEqual("2.0.0", _runner.StartedWith.Single().Config.Version);
+        AssertNothingLeftOver(box);
+    }
+}

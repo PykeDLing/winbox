@@ -18,8 +18,9 @@ namespace WinBox.Core.Boxes;
 ///   Source\         private   (the installer the user dropped in)
 ///   Reports\        private   (run reports, newest 20 kept)
 ///   Host\           private   (the box's MSIX package: manifest, BoxHost, launch.json, run.json)
-///   App.new\        private   (staging for updates, see FileOps.Replace)
-///   .unfinished     private   (marker for interrupted maintenance)
+///   App.new\        private   (an update's new app, until it takes App\'s place; see BoxStore.ReplaceApp)
+///   App.old\        private   (the app an update replaced, until it is deleted)
+///   .unfinished     private   (an update's new box.json, while App\ is being swapped)
 /// </code>
 /// </remarks>
 public sealed class BoxPaths
@@ -54,6 +55,7 @@ public sealed class BoxPaths
     public string Reports => Path.Combine(Root, "Reports");
     public string Host => Path.Combine(Root, "Host");
     public string AppStaging => Path.Combine(Root, "App.new");
+    public string AppPrevious => Path.Combine(Root, "App.old");
     public string UnfinishedMarker => Path.Combine(Root, ".unfinished");
 
     /// <summary>Directories the sandboxed app may write to.</summary>
@@ -63,7 +65,7 @@ public sealed class BoxPaths
     public IReadOnlyList<string> ReadOnlyItems => [App, Shim];
 
     /// <summary>Items the sandboxed app gets no access to at all.</summary>
-    public IReadOnlyList<string> PrivateItems => [ConfigFile, Icon, Source, Reports, Host, AppStaging, UnfinishedMarker];
+    public IReadOnlyList<string> PrivateItems => [ConfigFile, Icon, Source, Reports, Host, AppStaging, AppPrevious, UnfinishedMarker];
 
     /// <summary>Directories that must exist for the box to be usable.</summary>
     public IReadOnlyList<string> Skeleton => [App, Shim, Data, Tmp, State, Source, Reports];

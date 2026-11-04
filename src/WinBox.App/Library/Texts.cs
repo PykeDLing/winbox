@@ -16,6 +16,7 @@ public static class Texts
         BoxActivity.Stopping => "正在退出并保存数据…",
         BoxActivity.Closing => "数据已保存，正在关闭沙盒…",
         BoxActivity.Removing => "正在删除…",
+        BoxActivity.Updating => "正在更新…",
         _ => "未运行",
     };
 
@@ -28,13 +29,43 @@ public static class Texts
         ImportStep.Extracting => "取出程序（不运行安装程序）",
         ImportStep.CheckingCompatibility => "检查兼容性",
         ImportStep.Finishing => "收尾",
+        ImportStep.Updating => "换上新的程序，登录信息和数据保留",
         _ => "创建盒子的应用包",
     };
+
+    /// <summary>The import card's title: what the installer is for.</summary>
+    public static string Importing(ImportJob job) => job.Target is { } box
+        ? job.Failed ? $"没能用 {job.FileName} 更新“{box}”" : $"正在用 {job.FileName} 更新“{box}”"
+        : job.Failed ? $"没能添加 {job.FileName}" : $"正在添加 {job.FileName}";
+
+    public static string UpdateOfferTitle(UpdateOffer offer) => $"“{offer.Box.Config.Name}”已经在应用库里了";
+
+    /// <summary>What updating the box would do, for the card that asks.</summary>
+    public static string UpdateOffer(UpdateOffer offer)
+    {
+        var (current, incoming) = (offer.Box.Config.Version, offer.Incoming.Version);
+        var versions = BoxUpdate.Compare(current, incoming) switch
+        {
+            VersionChange.Newer => $"安装包里是新版本 {incoming}，盒子里是 {current}。",
+            VersionChange.Same => $"安装包里的版本和盒子里的一样（{current}）。",
+            VersionChange.Older => $"安装包里是旧版本 {incoming}，盒子里是 {current}。",
+            _ => "",
+        };
+        return versions + "更新盒子会换上安装包里的程序，登录信息、设置和数据都保留。"
+            + (offer.Running ? "它正在运行，更新前会先请它保存并退出。" : "")
+            + (offer.Count > 1 ? $"这样的盒子有 {offer.Count} 个，更新的是{Added(offer.Box.Config.CreatedAt)}的那个。" : "");
+    }
+
+    public static string Updated(BoxConfig config) => string.IsNullOrWhiteSpace(config.Version)
+        ? $"已更新“{config.Name}”，登录信息和数据都在"
+        : $"已把“{config.Name}”更新到 {config.Version}，登录信息和数据都在";
+
+    public const string UpdateWhileBusy = "它正在运行。请先退出它，再更新";
 
     public static string Issue(CompatibilityIssue issue) => issue.Code switch
     {
         IssueCode.InstallerScriptsSkipped => "没有运行安装程序：右键菜单、开机自启等安装步骤都已跳过",
-        IssueCode.SelfUpdaterDisabled => "自带的自动更新不可用",
+        IssueCode.SelfUpdaterDisabled => "自带的自动更新不可用：把新版安装包拖进来就能更新这个盒子",
         IssueCode.FilesOutsideAppSkipped => "安装包里要装到程序目录以外的文件没有放进盒子",
         IssueCode.ShellExtensionUnavailable => "右键菜单等资源管理器扩展不可用",
         IssueCode.InnerSandboxDisabled => "基于 Chromium 的软件：它自带的沙盒已关闭，由 WinBox 的沙盒负责隔离",
@@ -89,6 +120,7 @@ public static class Texts
         ImportFailure.PackagedApp => "这是 MSIX 应用包，Windows 会自己隔离安装它，不需要放进盒子",
         ImportFailure.ExtractionFailed => $"没能解开这个安装包（可能已损坏或加了密）{Detail(detail)}",
         ImportFailure.Declined => "没有添加：它可能无法在盒子里运行",
+        ImportFailure.NotTheSameApp => $"这个安装包里是“{detail}”，不是这个盒子里的软件。盒子没有改动",
         _ => failure.ToString(),
     };
 

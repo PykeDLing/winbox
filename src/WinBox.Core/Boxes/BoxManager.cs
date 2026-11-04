@@ -15,7 +15,17 @@ public sealed record RemoveOutcome(GuardCleanup? Cleanup, bool FolderLeftOver)
 }
 
 /// <summary>A new box. <see cref="RegistrationError"/> says why its package is not registered yet; opening it tries again.</summary>
-public sealed record ImportedBox(LoadedBox Box, Exception? RegistrationError);
+public sealed record ImportedBox(LoadedBox Box, Exception? RegistrationError)
+{
+    /// <summary>The installer updated <see cref="Box"/>, which was in the library already, instead of making a new box.</summary>
+    public bool Updated { get; init; }
+}
+
+/// <summary>
+/// Asked when an installer brings an app the library has a box of already (<see cref="BoxUpdate.IsSameApp"/>):
+/// the box to update with it, or null to add it as a new box. <paramref name="boxes"/> are oldest first.
+/// </summary>
+public delegate Task<LoadedBox?> UpdateChoice(IReadOnlyList<LoadedBox> boxes, BoxConfig incoming, CancellationToken cancellationToken);
 
 public sealed record RunOptions
 {
@@ -69,14 +79,26 @@ public sealed class BoxManager(
     /// </summary>
     /// <param name="confirm">Asked when WinBox expects the app not to run in a box (see <see cref="ImportConfirmation"/>).</param>
     /// <param name="register">False leaves the package to the first run (the CLI's import --no-package).</param>
+    /// <param name="chooseUpdate">
+    /// Asked when the library has a box of the app already; it may pick one to update instead (quitting it first if it
+    /// runs). Without it the installer always makes a new box.
+    /// </param>
     public async Task<ImportedBox> ImportAsync(
         string file,
         IProgress<ImportProgress>? progress = null,
         ImportConfirmation? confirm = null,
         bool register = true,
+        UpdateChoice? chooseUpdate = null,
         CancellationToken cancellationToken = default)
     {
-        var box = await import.ImportAsync(file, progress, confirm, cancellationToken).ConfigureAwait(false);
+        using var prepared = await import.PrepareAsync(file, progress, confirm, cancellationToken).ConfigureAwait(false);
+        if (chooseUpdate is not null)
+        {
+            var same = store.Load().OfType<LoadedBox>().Where(b => BoxUpdate.IsSameApp(b.Config, prepared.Config)).ToList();
+            if (same.Count > 0 && await chooseUpdate(same, prepared.Config, cancellationToken).ConfigureAwait(false) is { } target)
+                return new ImportedBox(await ReplaceAppAsync(target, prepared, quitFirst: true, progress, cancellationToken).ConfigureAwait(false), null) { Updated = true };
+        }
+        var box = prepared.Commit();
         if (!register)
             return new ImportedBox(box, null);
         if (packages.GetUnavailableReason() is { } reason)
@@ -91,6 +113,64 @@ public sealed class BoxManager(
         {
             return new ImportedBox(box, e);
         }
+    }
+
+    /// <summary>
+    /// Updates the box with the app <paramref name="file"/> brings, which must be the box's app
+    /// (<see cref="BoxUpdate.MayUpdate"/>; <see cref="ImportFailure.NotTheSameApp"/> otherwise). Refused while the box
+    /// runs: the user quits it first.
+    /// </summary>
+    public async Task<LoadedBox> UpdateAsync(
+        LoadedBox box,
+        string file,
+        IProgress<ImportProgress>? progress = null,
+        ImportConfirmation? confirm = null,
+        CancellationToken cancellationToken = default)
+    {
+        using var prepared = await import.PrepareAsync(file, progress, confirm, cancellationToken).ConfigureAwait(false);
+        if (!BoxUpdate.MayUpdate(box.Config, prepared.Config))
+            throw new ImportException(ImportFailure.NotTheSameApp, prepared.Config.Name);
+        return await ReplaceAppAsync(box, prepared, quitFirst: false, progress, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<LoadedBox> ReplaceAppAsync(LoadedBox box, PreparedImport prepared, bool quitFirst, IProgress<ImportProgress>? progress, CancellationToken cancellationToken)
+    {
+        progress?.Report(new ImportProgress(ImportStage.Updating));
+        using (await BoxLock.AcquireAsync(paths, box.Config.Id, _lockWait, cancellationToken).ConfigureAwait(false))
+        {
+            if (quitFirst)
+                await QuitLockedAsync(box, cancellationToken).ConfigureAwait(false);
+            // The app's files cannot be swapped under a live sandbox.
+            if (runner.IsRunning(box))
+                throw new BoxBusyException(box.Config.Id, BoxBusyReason.Running);
+            // box.json as it is now: its package may have been registered since the caller read it, and an earlier
+            // update a crash cut short may have changed it.
+            BoxStore.FinishInterruptedUpdate(box.Paths);
+            var current = store.Reload(box.Paths) ?? throw new InvalidOperationException($"Box {box.Config.Id:N} is gone.");
+            return store.ReplaceApp(current, prepared, BoxUpdate.Apply(current.Config, prepared.Config, DateTimeOffset.Now));
+        }
+    }
+
+    /// <summary>
+    /// Settles the updates a crash cut short (<see cref="BoxStore.FinishInterruptedUpdate"/>). A box another process
+    /// is working on is left to it. Returns the boxes settled.
+    /// </summary>
+    public async Task<IReadOnlyList<(Guid Id, UpdateRecovery Recovery)>> FinishInterruptedUpdatesAsync()
+    {
+        var settled = new List<(Guid, UpdateRecovery)>();
+        foreach (var (id, boxPaths) in store.InterruptedUpdates())
+        {
+            try
+            {
+                using (await BoxLock.AcquireAsync(paths, id, TimeSpan.Zero).ConfigureAwait(false))
+                    settled.Add((id, BoxStore.FinishInterruptedUpdate(boxPaths)));
+            }
+            catch (Exception e) when (e is BoxBusyException or IOException or UnauthorizedAccessException)
+            {
+                // Being updated right now, or held: tried again the next time.
+            }
+        }
+        return settled;
     }
 
     /// <summary>(Re)registers the box's package and records it in box.json. Refused while the box runs: re-registering ends its BoxHost.</summary>
@@ -126,6 +206,9 @@ public sealed class BoxManager(
         {
             if (runner.IsRunning(box))
                 throw new BoxBusyException(box.Config.Id, BoxBusyReason.Running);
+            // An update a crash cut short is settled first, so the app starts as box.json describes it.
+            if (BoxStore.FinishInterruptedUpdate(box.Paths) != UpdateRecovery.None)
+                box = store.Reload(box.Paths) ?? box;
             if (box.Config.Package is not { } package || !packages.IsRegistered(package))
             {
                 box = await RegisterLockedAsync(box, cancellationToken).ConfigureAwait(false);
@@ -150,12 +233,7 @@ public sealed class BoxManager(
         var id = box.Config.Id;
         using (await BoxLock.AcquireAsync(paths, id, _lockWait, cancellationToken).ConfigureAwait(false))
         {
-            if (runner.RequestStop(id))
-            {
-                var deadline = DateTimeOffset.UtcNow + _stopWait;
-                while (runner.IsRunning(box) && DateTimeOffset.UtcNow < deadline)
-                    await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken).ConfigureAwait(false);
-            }
+            await QuitLockedAsync(box, cancellationToken).ConfigureAwait(false);
             // Unregistering or deleting under a live sandbox would pull the app's files out from under it.
             if (runner.IsRunning(box))
                 throw new BoxBusyException(id, BoxBusyReason.Running);
@@ -170,6 +248,16 @@ public sealed class BoxManager(
             var deleted = store.Delete(box);
             return new RemoveOutcome(cleanup, FolderLeftOver: !deleted);
         }
+    }
+
+    /// <summary>Asks a running box to quit and waits until it has, or until BoxHost's own worst case has passed.</summary>
+    private async Task QuitLockedAsync(LoadedBox box, CancellationToken cancellationToken)
+    {
+        if (!runner.RequestStop(box.Config.Id))
+            return;
+        var deadline = DateTimeOffset.UtcNow + _stopWait;
+        while (runner.IsRunning(box) && DateTimeOffset.UtcNow < deadline)
+            await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Host settings that point into the boxes and would start a boxed program outside its sandbox.</summary>

@@ -21,6 +21,9 @@ public enum BoxActivity
     /// <summary>The app has exited and its state is saved; the sandbox is still being torn down.</summary>
     Closing,
     Removing,
+
+    /// <summary>An installer's app is taking the place of the box's app (quitting it first, if it ran).</summary>
+    Updating,
 }
 
 public sealed record BoxEntry(LoadedBox Box, BoxActivity Activity, string? IconPath, string? Problem)
@@ -42,12 +45,22 @@ public sealed record RemoveResult(bool Removed, IReadOnlyList<string> Leftovers)
 /// Why WinBox expects the app not to run in a box, while the import waits for the user to add it all the same
 /// (<see cref="LibraryService.AddAnyway"/>) or call it off (<see cref="LibraryService.CancelImport"/>).
 /// </param>
+/// <param name="Offer">
+/// The library has a box of the installer's app already, and the import waits for the user to update it
+/// (<see cref="LibraryService.UpdateBox"/>), add a new box (<see cref="LibraryService.AddAsNew"/>) or call it off.
+/// </param>
+/// <param name="Target">The name of the box the installer updates, once that is settled.</param>
+/// <param name="Done">What the import did, when that is worth a word of its own (an update leaves no new card).</param>
 public sealed record ImportJob(Guid Key, string FileName, ImportStep Step, DownloadProgress? Download, string? Error,
-    IReadOnlyList<CompatibilityIssue>? Blockers = null)
+    IReadOnlyList<CompatibilityIssue>? Blockers = null, UpdateOffer? Offer = null, string? Target = null, string? Done = null)
 {
     public bool Failed => Error is not null;
-    public bool Asking => Blockers is not null;
+    public bool Finished => Done is not null;
+    public bool Asking => Blockers is not null || Offer is not null;
 }
+
+/// <summary>An installer of an app the library has a box of: <see cref="Box"/>, the oldest of <see cref="Count"/> such boxes.</summary>
+public sealed record UpdateOffer(LoadedBox Box, int Count, BoxConfig Incoming, bool Running);
 
 /// <summary>Import progress as the library shows it: the pipeline's stages plus registering the box's package.</summary>
 public enum ImportStep
@@ -58,6 +71,7 @@ public enum ImportStep
     CheckingCompatibility,
     Finishing,
     Registering,
+    Updating,
 }
 
 /// <param name="Unfinished">
@@ -77,7 +91,7 @@ public sealed record LibrarySnapshot(
     /// <summary>Boxes whose app is up or coming up: what the tray lists, and what quitting WinBox stops.</summary>
     public IReadOnlyList<BoxEntry> Running => [.. Boxes.Where(b => b.Activity is BoxActivity.Starting or BoxActivity.Running)];
 
-    public int Importing => Imports.Count(j => !j.Failed);
+    public int Importing => Imports.Count(j => !j.Failed && !j.Finished);
 }
 
 /// <summary>
@@ -98,6 +112,7 @@ public sealed class LibraryService : IDisposable
     private readonly List<ImportJob> _imports = [];
     private readonly Dictionary<Guid, CancellationTokenSource> _importCancels = [];
     private readonly Dictionary<Guid, TaskCompletionSource> _importAnswers = [];
+    private readonly Dictionary<Guid, TaskCompletionSource<bool>> _updateAnswers = [];
     private List<LoadedBox> _boxes = [];
     private List<BrokenBox> _broken = [];
     private IReadOnlyList<HostReference> _leaks = [];
@@ -175,6 +190,9 @@ public sealed class LibraryService : IDisposable
         {
             _host.Store.CleanUpInterruptedImports();
             _host.Store.CleanUpInterruptedDeletes();
+            // Quick, and no other process is kept waiting: a box another one is updating is skipped.
+            foreach (var (id, recovery) in _host.Manager.FinishInterruptedUpdatesAsync().GetAwaiter().GetResult())
+                AppLog.Write($"an update of {id:N} was cut short: {recovery}");
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
@@ -280,22 +298,48 @@ public sealed class LibraryService : IDisposable
     public void Import(IEnumerable<string> files)
     {
         foreach (var file in files)
+            StartImport(file, target: null);
+    }
+
+    /// <summary>Updates a box with the app <paramref name="file"/> brings; the box must not be running.</summary>
+    public void Update(Guid id, string file)
+    {
+        LoadedBox? box;
+        BoxActivity activity;
+        lock (_lock)
         {
-            var job = new ImportJob(Guid.NewGuid(), Path.GetFileName(file), ImportStep.Inspecting, null, null);
-            var cancel = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
-            lock (_lock)
-            {
-                if (_quitting)
-                {
-                    cancel.Dispose();
-                    return;
-                }
-                _imports.Add(job);
-                _importCancels[job.Key] = cancel;
-            }
-            Notify();
-            _ = Task.Run(() => ImportAsync(job, file, cancel));
+            box = _boxes.FirstOrDefault(b => b.Config.Id == id);
+            activity = _activity.GetValueOrDefault(id);
         }
+        if (box is null)
+            return;
+        if (activity != BoxActivity.Idle)
+        {
+            lock (_lock)
+                _imports.Add(new ImportJob(Guid.NewGuid(), Path.GetFileName(file), ImportStep.Inspecting, null, Texts.UpdateWhileBusy,
+                    Target: box.Config.Name));
+            Notify();
+            return;
+        }
+        StartImport(file, box);
+    }
+
+    private void StartImport(string file, LoadedBox? target)
+    {
+        var job = new ImportJob(Guid.NewGuid(), Path.GetFileName(file), ImportStep.Inspecting, null, null, Target: target?.Config.Name);
+        var cancel = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
+        lock (_lock)
+        {
+            if (_quitting)
+            {
+                cancel.Dispose();
+                return;
+            }
+            _imports.Add(job);
+            _importCancels[job.Key] = cancel;
+        }
+        Notify();
+        _ = Task.Run(() => ImportAsync(job, file, target, cancel));
     }
 
     /// <summary>Stops an import in progress; its card goes once the import has cleaned up after itself.</summary>
@@ -312,6 +356,20 @@ public sealed class LibraryService : IDisposable
             _importAnswers.GetValueOrDefault(key)?.TrySetResult();
     }
 
+    /// <summary>Updates the box an import offered to update (see <see cref="ImportJob.Offer"/>).</summary>
+    public void UpdateBox(Guid key)
+    {
+        lock (_lock)
+            _updateAnswers.GetValueOrDefault(key)?.TrySetResult(true);
+    }
+
+    /// <summary>Adds an installer the import offered as an update as a box of its own all the same.</summary>
+    public void AddAsNew(Guid key)
+    {
+        lock (_lock)
+            _updateAnswers.GetValueOrDefault(key)?.TrySetResult(false);
+    }
+
     public void DismissImport(Guid key)
     {
         lock (_lock)
@@ -319,8 +377,11 @@ public sealed class LibraryService : IDisposable
         Notify();
     }
 
-    private async Task ImportAsync(ImportJob job, string file, CancellationTokenSource cancel)
+    private async Task ImportAsync(ImportJob job, string file, LoadedBox? target, CancellationTokenSource cancel)
     {
+        // The box the installer updates, once that is settled: while its app is swapped, nothing else is done to it.
+        var updating = target?.Config.Id;
+
         void Update(Func<ImportJob, ImportJob> change)
         {
             lock (_lock)
@@ -359,13 +420,61 @@ public sealed class LibraryService : IDisposable
             }
         }
 
-        try
+        // The card asks whether to update the box of the app the library has already, add a new one, or neither.
+        async Task<LoadedBox?> ChooseUpdate(IReadOnlyList<LoadedBox> boxes, BoxConfig incoming, CancellationToken token)
         {
-            var progress = new InlineProgress<ImportProgress>(p => Update(j => j with { Step = StepOf(p.Stage), Download = p.Download }));
-            var (box, registrationError) = await _host.Manager.ImportAsync(file, progress, Confirm, cancellationToken: cancel.Token);
+            var box = boxes[0];
+            var answer = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            bool running;
             lock (_lock)
             {
-                _imports.RemoveAll(j => j.Key == job.Key);
+                _updateAnswers[job.Key] = answer;
+                running = _activity.GetValueOrDefault(box.Config.Id) != BoxActivity.Idle;
+            }
+            AppLog.Write($"importing {job.FileName}: {incoming.Name} {incoming.Version} is in {box.Config.Id:N} already ({box.Config.Version}); asking whether to update it");
+            Update(j => j with { Offer = new UpdateOffer(box, boxes.Count, incoming, running) });
+            try
+            {
+                var update = await answer.Task.WaitAsync(token);
+                AppLog.Write($"importing {job.FileName}: {(update ? "updating the box" : "adding a new box")}");
+                if (!update)
+                    return null;
+                updating = box.Config.Id;
+                Update(j => j with { Target = box.Config.Name });
+                return box;
+            }
+            finally
+            {
+                lock (_lock)
+                    _updateAnswers.Remove(job.Key);
+                Update(j => j with { Offer = null });
+            }
+        }
+
+        try
+        {
+            var progress = new InlineProgress<ImportProgress>(p =>
+            {
+                if (p.Stage == ImportStage.Updating && updating is { } id)
+                    SetActivity(id, _ => BoxActivity.Updating);
+                Update(j => j with { Step = StepOf(p.Stage), Download = p.Download });
+            });
+            LoadedBox box;
+            Exception? registrationError = null;
+            var updated = target is not null;
+            if (target is null)
+            {
+                var imported = await _host.Manager.ImportAsync(file, progress, Confirm, chooseUpdate: ChooseUpdate, cancellationToken: cancel.Token);
+                (box, registrationError, updated) = (imported.Box, imported.RegistrationError, imported.Updated);
+            }
+            else
+                box = await _host.Manager.UpdateAsync(target, file, progress, Confirm, cancel.Token);
+            lock (_lock)
+            {
+                if (updated)
+                    _problems.Remove(box.Config.Id);
+                else
+                    _imports.RemoveAll(j => j.Key == job.Key);
                 // The box is in the library either way; opening it registers the package again, so the user never
                 // imports it a second time to get past this.
                 if (registrationError is not null)
@@ -373,8 +482,16 @@ public sealed class LibraryService : IDisposable
             }
             if (registrationError is not null)
                 AppLog.Write($"registering the package of {box.Config.Id:N} failed: {registrationError}");
+            if (updated)
+            {
+                AppLog.Write($"updated {box.Config.Id:N} to {box.Config.Name} {box.Config.Version} from {job.FileName}");
+                SetActivity(box.Config.Id, current => current == BoxActivity.Updating ? BoxActivity.Idle : current);
+            }
             Reload();
             await ExtractIconAsync(box);
+            // The new app is in the box and the box is free again: the card says so until it is closed.
+            if (updated)
+                Update(j => j with { Done = Texts.Updated(box.Config) });
         }
         catch (OperationCanceledException) when (cancel.IsCancellationRequested)
         {
@@ -386,6 +503,11 @@ public sealed class LibraryService : IDisposable
         catch (ImportException e)
         {
             Update(j => j with { Error = Texts.ImportFailed(e.Failure, e.Detail) });
+        }
+        catch (BoxBusyException e)
+        {
+            // Only an update waits for a box: it was started, or did not quit in time.
+            Update(j => j with { Error = e.Reason == BoxBusyReason.Running ? Texts.UpdateWhileBusy : Texts.Busy(e.Reason) });
         }
         catch (TimeoutException)
         {
@@ -409,7 +531,16 @@ public sealed class LibraryService : IDisposable
             lock (_lock)
                 _importCancels.Remove(job.Key);
             cancel.Dispose();
+            if (updating is { } id && Find(id) is { } box)
+                SetActivity(id, current => current != BoxActivity.Updating ? current
+                    : _host.Runner.IsRunning(box) ? BoxActivity.Running : BoxActivity.Idle);
         }
+    }
+
+    private LoadedBox? Find(Guid id)
+    {
+        lock (_lock)
+            return _boxes.FirstOrDefault(b => b.Config.Id == id);
     }
 
     private static ImportStep StepOf(ImportStage stage) => stage switch
@@ -419,6 +550,7 @@ public sealed class LibraryService : IDisposable
         ImportStage.Extracting => ImportStep.Extracting,
         ImportStage.CheckingCompatibility => ImportStep.CheckingCompatibility,
         ImportStage.Registering => ImportStep.Registering,
+        ImportStage.Updating => ImportStep.Updating,
         _ => ImportStep.Finishing,
     };
 
@@ -466,7 +598,7 @@ public sealed class LibraryService : IDisposable
                         SetActivity(id, current => current == BoxActivity.Starting ? BoxActivity.Running : current);
                     // "Saved" is only said when BoxShim says so; a failed save shows up as a problem once the run ends.
                     else if (r.State == BoxRunState.Closing && r.StateSaved == true)
-                        SetActivity(id, current => current == BoxActivity.Removing ? current : BoxActivity.Closing);
+                        SetActivity(id, current => current is BoxActivity.Removing or BoxActivity.Updating ? current : BoxActivity.Closing);
                 },
             });
             if (record is null)
@@ -486,8 +618,8 @@ public sealed class LibraryService : IDisposable
         {
             _ownRuns.Remove(id);
             _pendingStops.Remove(id);
-            // A removal that stopped this run owns the box's state until it is done.
-            if (_activity.GetValueOrDefault(id) != BoxActivity.Removing)
+            // A removal or an update that stopped this run owns the box's state until it is done.
+            if (_activity.GetValueOrDefault(id) is not (BoxActivity.Removing or BoxActivity.Updating))
                 _activity[id] = BoxActivity.Idle;
             if (problem is not null)
                 _problems[id] = problem;
@@ -714,7 +846,7 @@ public sealed class LibraryService : IDisposable
                     foreach (var box in _boxes)
                     {
                         var id = box.Config.Id;
-                        if (_ownRuns.Contains(id) || _activity.GetValueOrDefault(id) == BoxActivity.Removing)
+                        if (_ownRuns.Contains(id) || _activity.GetValueOrDefault(id) is BoxActivity.Removing or BoxActivity.Updating)
                             continue;
                         var current = _activity.GetValueOrDefault(id);
                         var next = !_host.Runner.IsRunning(box) ? BoxActivity.Idle

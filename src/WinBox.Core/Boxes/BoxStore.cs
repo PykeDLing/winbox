@@ -1,4 +1,5 @@
 using System.Text.Json;
+using WinBox.Core.Import;
 using WinBox.Core.IO;
 
 namespace WinBox.Core.Boxes;
@@ -17,6 +18,22 @@ public enum BrokenReason
     /// <summary>Corrupt, or written by a newer WinBox with an incompatible schema.</summary>
     UnreadableConfig,
     Other,
+}
+
+/// <summary>What <see cref="BoxStore.FinishInterruptedUpdate"/> found and did.</summary>
+public enum UpdateRecovery
+{
+    /// <summary>No update was cut short.</summary>
+    None,
+
+    /// <summary>The swap had not finished: the app as it was is back, and box.json never changed.</summary>
+    RolledBack,
+
+    /// <summary>The new app was in place: box.json now describes it.</summary>
+    Finished,
+
+    /// <summary>Only the replaced app was left over, and it was deleted (or still waits to be).</summary>
+    CleanedUp,
 }
 
 /// <summary>Owns the Boxes directory: listing, importing through a staging directory, and deleting.</summary>
@@ -66,6 +83,131 @@ public sealed class BoxStore
     }
 
     public void Save(LoadedBox box) => JsonFile.Write(box.Paths.ConfigFile, box.Config, WinBoxJson.Files.BoxConfig);
+
+    /// <summary>The box as its box.json says now; null when it is gone or cannot be read.</summary>
+    public LoadedBox? Reload(BoxPaths paths) => Directory.Exists(paths.Root) ? LoadOne(paths) as LoadedBox : null;
+
+    /// <summary>
+    /// Puts <paramref name="update"/>'s app in the box's place and <paramref name="config"/> in its box.json, leaving
+    /// the rest of the box as it is. The new app comes in as App.new, App goes to App.old, App.new becomes App; the new
+    /// box.json waits in .unfinished until then, so <see cref="FinishInterruptedUpdate"/> can tell how far a crash got
+    /// and either finish the update or put the old app back. Callers hold the box's lock and make sure it does not run.
+    /// </summary>
+    public LoadedBox ReplaceApp(LoadedBox box, PreparedImport update, BoxConfig config)
+    {
+        var paths = box.Paths;
+        FinishInterruptedUpdate(paths);
+        if (Directory.Exists(paths.AppPrevious))
+            throw new IOException($"The app an earlier update replaced is still in use: {paths.AppPrevious}");
+        Retry(() => Directory.Move(update.Paths.App, paths.AppStaging));
+        JsonFile.Write(paths.UnfinishedMarker, config, WinBoxJson.Files.BoxConfig);
+        try
+        {
+            // A virus scanner looking at the files just unpacked can hold them for a moment.
+            Retry(() => Directory.Move(paths.App, paths.AppPrevious));
+            Retry(() => Directory.Move(paths.AppStaging, paths.App));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            FinishInterruptedUpdate(paths);
+            throw;
+        }
+        FinishInterruptedUpdate(paths);
+        ReplaceSource(paths.Source, update.Paths.Source);
+        return new LoadedBox(paths, config);
+    }
+
+    /// <summary>
+    /// Settles an update a crash cut short, by where it got to: while App.new is there the swap never finished and the
+    /// app as it was comes back; once App.new has become App, box.json is brought in line with it. What is left of the
+    /// replaced app is deleted, or left for the next time while something holds it.
+    /// </summary>
+    public static UpdateRecovery FinishInterruptedUpdate(BoxPaths paths)
+    {
+        if (Directory.Exists(paths.AppStaging))
+        {
+            if (!Directory.Exists(paths.App) && Directory.Exists(paths.AppPrevious))
+                Directory.Move(paths.AppPrevious, paths.App);
+            DeleteTree(paths.AppStaging);
+            File.Delete(paths.UnfinishedMarker);
+            TryDeleteTree(paths.AppPrevious);
+            return UpdateRecovery.RolledBack;
+        }
+        var recovery = UpdateRecovery.None;
+        if (File.Exists(paths.UnfinishedMarker))
+        {
+            if (Directory.Exists(paths.App))
+            {
+                JsonFile.Write(paths.ConfigFile, JsonFile.Read(paths.UnfinishedMarker, WinBoxJson.Files.BoxConfig), WinBoxJson.Files.BoxConfig);
+                recovery = UpdateRecovery.Finished;
+            }
+            File.Delete(paths.UnfinishedMarker);
+        }
+        if (Directory.Exists(paths.AppPrevious))
+        {
+            if (!Directory.Exists(paths.App))
+            {
+                Directory.Move(paths.AppPrevious, paths.App);
+                return UpdateRecovery.RolledBack;
+            }
+            TryDeleteTree(paths.AppPrevious);
+            if (recovery == UpdateRecovery.None)
+                recovery = UpdateRecovery.CleanedUp;
+        }
+        return recovery;
+    }
+
+    /// <summary>Boxes an update was cut short in (see <see cref="FinishInterruptedUpdate"/>), with their ids.</summary>
+    public IReadOnlyList<(Guid Id, BoxPaths Paths)> InterruptedUpdates() =>
+        [.. Directory.EnumerateDirectories(_paths.Boxes, "*" + BoxPaths.Extension)
+            .Select(dir => (Dir: dir, Paths: new BoxPaths(dir)))
+            .Where(b => Directory.Exists(b.Paths.AppStaging) || Directory.Exists(b.Paths.AppPrevious) || File.Exists(b.Paths.UnfinishedMarker))
+            .Select(b => (Ok: Guid.TryParse(Path.GetFileNameWithoutExtension(b.Dir), out var id), Id: id, b.Paths))
+            .Where(b => b.Ok)
+            .Select(b => (b.Id, b.Paths))];
+
+    /// <summary>The installer the box was last made or updated from, in place of the one before.</summary>
+    private static void ReplaceSource(string source, string updated)
+    {
+        Directory.CreateDirectory(source);
+        var kept = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in Directory.EnumerateFiles(updated))
+        {
+            File.Move(file, Path.Combine(source, Path.GetFileName(file)), overwrite: true);
+            kept.Add(Path.GetFileName(file));
+        }
+        foreach (var file in Directory.EnumerateFiles(source).Where(f => !kept.Contains(Path.GetFileName(f))))
+            File.Delete(file);
+    }
+
+    private static void Retry(Action move)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                move();
+                return;
+            }
+            catch (Exception e) when ((e is IOException or UnauthorizedAccessException) && attempt < 10)
+            {
+                Thread.Sleep(300);
+            }
+        }
+    }
+
+    private static void TryDeleteTree(string dir)
+    {
+        try
+        {
+            if (Directory.Exists(dir))
+                DeleteTree(dir);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // Still held; the next update or the next start of WinBox deletes it.
+        }
+    }
 
     /// <summary>
     /// Starts an import in Boxes\&lt;id&gt;.box.partial. Nothing becomes visible in the library until

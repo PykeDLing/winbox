@@ -62,6 +62,8 @@ internal sealed class LibraryPage : Component
     private const string DropGlyph = "\uE896";
     private const string ErrorGlyph = "\uEA39";
     private const string WarningGlyph = "\uE7BA";
+    private const string UpdateGlyph = "\uE895";
+    private const string DoneGlyph = "\uE930";
 
     public override Element Render()
     {
@@ -377,8 +379,24 @@ internal sealed class LibraryPage : Component
             .WithFlyout(MenuItems(FlyoutPlacementMode.BottomEdgeAlignedLeft,
                 MenuSubItem("打开授权文件夹", [.. library.HostPlaces.Select(place => MenuItem(place.Label,
                     () => _ = Guarded(() => OpenOutsideAsync(library.OpenFolderOutsideAsync(entry.Id, place.Path), place.Path))))]),
-                MenuItem("在盒外打开文件…", () => _ = Guarded(() => PickOutsideAsync(entry)))))
-            .AutomationName($"{entry.Box.Config.Name}的更多操作").ToolTip("在盒子外打开文件或文件夹");
+                MenuItem("在盒外打开文件…", () => _ = Guarded(() => PickOutsideAsync(entry))),
+                MenuItem("用新安装包更新…", () => _ = Guarded(() => PickUpdateAsync(entry)))))
+            .AutomationName($"{entry.Box.Config.Name}的更多操作").ToolTip("更新，或在盒子外打开文件和文件夹");
+
+        // A newer installer of the box's app; dropping one in offers the same, this is the way the menu shows.
+        async Task PickUpdateAsync(BoxEntry entry)
+        {
+            AppLog.Write($"opening the installer picker to update {entry.Id:N}");
+            var picker = new Microsoft.Windows.Storage.Pickers.FileOpenPicker(window!.AppWindow.Id)
+            {
+                SuggestedStartLocation = Microsoft.Windows.Storage.Pickers.PickerLocationId.Downloads,
+                CommitButtonText = "更新",
+            };
+            foreach (var type in PickerTypes)
+                picker.FileTypeFilter.Add(type);
+            if (await picker.PickSingleFileAsync() is { } file)
+                library.Update(entry.Id, file.Path);
+        }
 
         async Task FixLeaksAsync()
         {
@@ -428,7 +446,9 @@ internal sealed class LibraryPage : Component
         banners.AddRange(snapshot.Imports.Select(job => ImportCard(job,
             dismiss: () => library.DismissImport(job.Key),
             cancel: () => library.CancelImport(job.Key),
-            addAnyway: () => library.AddAnyway(job.Key)).WithKey(job.Key.ToString("N"))));
+            addAnyway: () => library.AddAnyway(job.Key),
+            update: () => library.UpdateBox(job.Key),
+            addNew: () => library.AddAsNew(job.Key)).WithKey(job.Key.ToString("N"))));
         banners.AddRange(snapshot.Broken.Select(b =>
             InfoBar("有一个盒子读不出来", $"{b.Paths.Root}（{b.Reason}）。WinBox 不会动它。").Warning().IsClosable(false)
                 .WithKey(b.Paths.Root)));
@@ -495,8 +515,29 @@ internal sealed class LibraryPage : Component
                 DragOperations.Copy));
     }
 
-    private static Element ImportCard(ImportJob job, Action dismiss, Action cancel, Action addAnyway)
+    private static Element ImportCard(ImportJob job, Action dismiss, Action cancel, Action addAnyway, Action update, Action addNew)
     {
+        // The library has a box of the app already: updating it is what the user most likely dropped it in for.
+        if (job.Offer is { } offer)
+            return Card((FlexRow(
+                    Glyph(UpdateGlyph, 24),
+                    VStack(4,
+                        BodyStrong(Texts.UpdateOfferTitle(offer)),
+                        Body(Texts.UpdateOffer(offer)).TextWrapping()
+                    ).Flex(grow: 1, basis: 0),
+                    HStack(8,
+                        Button("取消", cancel).AutomationName($"取消添加{job.FileName}"),
+                        Button("另建一个盒子", addNew).AutomationName($"另建一个盒子{job.FileName}"),
+                        Button("更新盒子", update).AccentButton().AutomationName($"更新盒子{job.FileName}")))
+                with { ColumnGap = 16, AlignItems = FlexAlign.Center }));
+
+        if (job.Done is { } done)
+            return Card((FlexRow(
+                    Glyph(DoneGlyph, 24, Theme.SystemSuccess),
+                    BodyStrong(done).TextWrapping().Flex(grow: 1, basis: 0),
+                    Button("关闭", dismiss).AutomationName($"关闭{job.FileName}的提示"))
+                with { ColumnGap = 16, AlignItems = FlexAlign.Center }));
+
         // WinBox expects the app not to run in a box: the import waits, and not adding it is the default.
         if (job.Blockers is { } blockers)
             return Card((FlexRow(
@@ -513,10 +554,10 @@ internal sealed class LibraryPage : Component
 
         var status = job.Failed
             ? VStack(2,
-                BodyStrong($"没能添加 {job.FileName}"),
+                BodyStrong(Texts.Importing(job)),
                 Body(job.Error!).Foreground(Theme.SecondaryText).TextWrapping())
             : VStack(2,
-                BodyStrong($"正在添加 {job.FileName}"),
+                BodyStrong(Texts.Importing(job)),
                 Caption(Texts.Step(job)).Foreground(Theme.SecondaryText));
         var leading = job.Failed
             ? Glyph(ErrorGlyph, 24, Theme.SystemCritical)
@@ -526,8 +567,8 @@ internal sealed class LibraryPage : Component
                 status.Flex(grow: 1, basis: 0),
                 job.Failed
                     ? Button("关闭", dismiss).AutomationName($"关闭{job.FileName}的提示")
-                    // Registering the package cannot be called back halfway; by then the box is all but done.
-                    : Button("取消", cancel).AutomationName($"取消添加{job.FileName}").IsEnabled(job.Step != ImportStep.Registering))
+                    // Registering the package or swapping the app cannot be called back halfway; by then the box is all but done.
+                    : Button("取消", cancel).AutomationName($"取消添加{job.FileName}").IsEnabled(job.Step is not (ImportStep.Registering or ImportStep.Updating)))
             with { ColumnGap = 16, AlignItems = FlexAlign.Center }));
     }
 
@@ -538,7 +579,7 @@ internal sealed class LibraryPage : Component
             ? Image(new Uri(path).AbsoluteUri).Size(48, 48).AccessibilityHidden()
             : Glyph(PackageGlyph, 32, Theme.SecondaryText).Size(48, 48);
 
-        var busy = entry.Activity is BoxActivity.Starting or BoxActivity.Stopping or BoxActivity.Closing or BoxActivity.Removing;
+        var busy = entry.Activity is BoxActivity.Starting or BoxActivity.Stopping or BoxActivity.Closing or BoxActivity.Removing or BoxActivity.Updating;
         Element light = busy
             ? ProgressRing().Size(16, 16)
             : Border(Empty()).Size(8, 8).CornerRadius(4)

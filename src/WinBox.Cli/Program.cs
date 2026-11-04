@@ -19,6 +19,8 @@ try
         ["list"] => List(),
         ["import", var file, .. var flags] when flags.All(f => f is "--no-package" or "--anyway") =>
             await Import(file, register: !flags.Contains("--no-package"), anyway: flags.Contains("--anyway")),
+        ["update", var box, var file, .. var flags] when flags.All(f => f is "--anyway") =>
+            await Update(box, file, anyway: flags.Contains("--anyway")),
         ["package", var box] => await Package(box),
         ["run", var box, ..] => await Run(box, args.Skip(2).ToArray()),
         ["stop", var box] => Stop(box),
@@ -55,6 +57,9 @@ int Usage()
                                    create a box from an installer (stubs are resolved through recipes)
                                    and register its package. An app WinBox expects not to run in a box
                                    (measured, or asking for administrator rights) is only imported with --anyway
+          update <id|name> <installer> [--anyway]
+                                   put the app the installer brings in the box's place; its data, settings
+                                   and package stay. Refused while the box runs, or for another app
           package <id|name>        (re)register the box's MSIX package
           run <id|name> [options]  launch a box inside its package. Options ({data} = the box's Data dir):
                 --seconds N   stop it after N seconds
@@ -110,6 +115,8 @@ int List()
                     : "none";
                 Console.WriteLine($"{b.Config.Id}  {b.Config.Name}  {b.Config.Version}  entry={b.Config.Entry}");
                 Console.WriteLine($"    package: {package}");
+                if (b.Config.UpdatedAt is { } updatedAt)
+                    Console.WriteLine($"    updated: {updatedAt.ToLocalTime():yyyy-MM-dd HH:mm} from {b.Config.Source.FileName}");
                 if (host.Runner.ReadRun(b) is { } run)
                     Console.WriteLine($"    last run: {run.State} host={run.HostProcessId} exit={run.ExitCode} {run.Error}");
                 foreach (var issue in b.Config.Issues)
@@ -123,20 +130,20 @@ int List()
     return 0;
 }
 
-async Task<int> Import(string file, bool register, bool anyway)
+ImportConfirmation ConfirmUnless(bool anyway) => (blockers, _) =>
 {
-    Task<bool> Confirm(IReadOnlyList<CompatibilityIssue> blockers, CancellationToken cancellationToken)
-    {
-        foreach (var blocker in blockers)
-            Console.WriteLine($"expected not to run in a box: {blocker.Code} {blocker.Detail}");
-        if (!anyway)
-            Console.Error.WriteLine("not imported; pass --anyway to import it all the same");
-        return Task.FromResult(anyway);
-    }
+    foreach (var blocker in blockers)
+        Console.WriteLine($"expected not to run in a box: {blocker.Code} {blocker.Detail}");
+    if (!anyway)
+        Console.Error.WriteLine("not imported; pass --anyway to import it all the same");
+    return Task.FromResult(anyway);
+};
 
+IProgress<ImportProgress> PrintProgress()
+{
     var lastStage = (ImportStage?)null;
     var lastPercent = -1;
-    var progress = new Progress<ImportProgress>(p =>
+    return new Progress<ImportProgress>(p =>
     {
         if (p.Stage != lastStage)
         {
@@ -151,7 +158,22 @@ async Task<int> Import(string file, bool register, bool anyway)
             lastPercent = percent;
         }
     });
-    var (box, registrationError) = await host.Manager.ImportAsync(file, progress, Confirm, register);
+}
+
+async Task<int> Update(string key, string file, bool anyway)
+{
+    var box = Find(key);
+    var updated = await host.Manager.UpdateAsync(box, file, PrintProgress(), ConfirmUnless(anyway));
+    Console.WriteLine($"updated {updated.Config.Name} {box.Config.Version} -> {updated.Config.Version} in {updated.Paths.Root}");
+    Console.WriteLine($"entry: {updated.Config.Entry}  args: {string.Join(' ', updated.Config.LaunchArguments)}");
+    foreach (var issue in updated.Config.Issues)
+        Console.WriteLine($"issue: {issue.Code} ({issue.Severity}) {issue.Detail}");
+    return 0;
+}
+
+async Task<int> Import(string file, bool register, bool anyway)
+{
+    var (box, registrationError) = await host.Manager.ImportAsync(file, PrintProgress(), ConfirmUnless(anyway), register);
     Console.WriteLine($"imported {box.Config.Name} {box.Config.Version} -> {box.Paths.Root}");
     Console.WriteLine($"entry: {box.Config.Entry}  args: {string.Join(' ', box.Config.LaunchArguments)}");
     foreach (var issue in box.Config.Issues)
