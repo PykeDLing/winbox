@@ -575,8 +575,8 @@ internal sealed class LibraryPage : Component
     private static Element BoxCard(BoxEntry entry, Action open, Action show, Action quit, Action remove, Element more)
     {
         var config = entry.Box.Config;
-        Element icon = entry.IconPath is { } path
-            ? Image(new Uri(path).AbsoluteUri).Size(48, 48).AccessibilityHidden()
+        Element icon = entry.IconUri is { } uri
+            ? Image(uri).Size(48, 48).AccessibilityHidden()
             : Glyph(PackageGlyph, 32, Theme.SecondaryText).Size(48, 48);
 
         var busy = entry.Activity is BoxActivity.Starting or BoxActivity.Stopping or BoxActivity.Closing or BoxActivity.Removing or BoxActivity.Updating;

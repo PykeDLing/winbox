@@ -26,7 +26,8 @@ public enum BoxActivity
     Updating,
 }
 
-public sealed record BoxEntry(LoadedBox Box, BoxActivity Activity, string? IconPath, string? Problem)
+/// <param name="IconUri">The box's icon, versioned by when it was written: see <see cref="LibraryService.IconUri"/>.</param>
+public sealed record BoxEntry(LoadedBox Box, BoxActivity Activity, string? IconUri, string? Problem)
 {
     public Guid Id => Box.Config.Id;
     public bool CanOpen => Activity == BoxActivity.Idle;
@@ -51,8 +52,10 @@ public sealed record RemoveResult(bool Removed, IReadOnlyList<string> Leftovers)
 /// </param>
 /// <param name="Target">The name of the box the installer updates, once that is settled.</param>
 /// <param name="Done">What the import did, when that is worth a word of its own (an update leaves no new card).</param>
+/// <param name="Updated">The box an update was done to; the card saying so goes when that box is deleted.</param>
 public sealed record ImportJob(Guid Key, string FileName, ImportStep Step, DownloadProgress? Download, string? Error,
-    IReadOnlyList<CompatibilityIssue>? Blockers = null, UpdateOffer? Offer = null, string? Target = null, string? Done = null)
+    IReadOnlyList<CompatibilityIssue>? Blockers = null, UpdateOffer? Offer = null, string? Target = null, string? Done = null,
+    Guid? Updated = null)
 {
     public bool Failed => Error is not null;
     public bool Finished => Done is not null;
@@ -247,7 +250,7 @@ public sealed class LibraryService : IDisposable
             foreach (var box in _boxes)
             {
                 if (File.Exists(box.Paths.Icon))
-                    _icons[box.Config.Id] = box.Paths.Icon;
+                    _icons[box.Config.Id] = IconUri(box.Paths.Icon);
                 if (!_activity.ContainsKey(box.Config.Id))
                     _activity[box.Config.Id] = _host.Runner.IsRunning(box) ? BoxActivity.Running : BoxActivity.Idle;
             }
@@ -491,7 +494,7 @@ public sealed class LibraryService : IDisposable
             await ExtractIconAsync(box);
             // The new app is in the box and the box is free again: the card says so until it is closed.
             if (updated)
-                Update(j => j with { Done = Texts.Updated(box.Config) });
+                Update(j => j with { Done = Texts.Updated(box.Config), Updated = box.Config.Id });
         }
         catch (OperationCanceledException) when (cancel.IsCancellationRequested)
         {
@@ -784,6 +787,8 @@ public sealed class LibraryService : IDisposable
                 _activity.Remove(id);
                 _problems.Remove(id);
                 _icons.Remove(id);
+                // "Updated, and the data is all there" would now speak of a box that is gone.
+                _imports.RemoveAll(j => j.Updated == id);
             }
         }
         catch (Exception e)
@@ -875,10 +880,17 @@ public sealed class LibraryService : IDisposable
         if (await IconExtractor.TrySaveAsync(exe, box.Paths.Icon))
         {
             lock (_lock)
-                _icons[box.Config.Id] = box.Paths.Icon;
+                _icons[box.Config.Id] = IconUri(box.Paths.Icon);
             Notify();
         }
     }
+
+    /// <summary>
+    /// The card's source for an icon file. An update writes the new app's icon to the same path, and an unchanged
+    /// source would keep the old picture: Reactor leaves an equal Source alone, and XAML caches images by URI. So the
+    /// URI carries the file's write time.
+    /// </summary>
+    internal static string IconUri(string path) => $"{new Uri(path).AbsoluteUri}?v={File.GetLastWriteTimeUtc(path).Ticks}";
 
     private bool SetActivity(Guid id, Func<BoxActivity, BoxActivity> change)
     {
