@@ -26,6 +26,8 @@ try
         ["stop", var box] => Stop(box),
         ["show", var box] => Show(box),
         ["remove", var box] => await Remove(box),
+        ["go-back", var box] => await GoBack(box),
+        ["delete-backup", var box] => await DeleteBackup(box),
         ["guard"] => Guard(fix: false),
         ["guard", "--fix"] => Guard(fix: true),
         _ => Usage(),
@@ -77,6 +79,10 @@ int Usage()
           stop <id|name>           quit a running box: ask its app to save and exit, end whatever is left
                                    after 10 seconds, then save the box's state
           show <id|name>           bring back the window of a running box's app
+          go-back <id|name>        swap the box with its backup: the app and data it had before its last
+                                   update come back, and what it has now becomes the backup. Refused while
+                                   the box runs
+          delete-backup <id|name>  delete the box's backup and give its disk space back
           remove <id|name>         unregister the box's package, delete the box and the host's traces of it
           guard [--fix]            look for host settings that point into the boxes (autostart, file
                                    associations, shortcuts, tasks...) and for Windows' records of boxes
@@ -118,6 +124,8 @@ int List()
                 Console.WriteLine($"    package: {package}");
                 if (b.Config.UpdatedAt is { } updatedAt)
                     Console.WriteLine($"    updated: {updatedAt.ToLocalTime():yyyy-MM-dd HH:mm} from {b.Config.Source.FileName}");
+                if (BoxStore.ReadBackup(b.Paths) is { } backup)
+                    Console.WriteLine($"    backup: {backup.Config.Version} as of {backup.MadeAt.ToLocalTime():yyyy-MM-dd HH:mm}, {backup.Bytes / (1024 * 1024)} MB");
                 if (host.Runner.ReadRun(b) is { } run)
                     Console.WriteLine($"    last run: {run.State} host={run.HostProcessId} exit={run.ExitCode} {run.Error}");
                 foreach (var issue in b.Config.Issues)
@@ -164,17 +172,48 @@ IProgress<ImportProgress> PrintProgress()
 async Task<int> Update(string key, string file, bool anyway, bool older)
 {
     var box = Find(key);
-    var updated = await host.Manager.UpdateAsync(box, file, PrintProgress(), ConfirmUnless(anyway), (current, incoming, _) =>
+    var result = await host.Manager.UpdateAsync(box, file, PrintProgress(), ConfirmUnless(anyway), (current, incoming, _) =>
     {
         Console.WriteLine($"older than the box's app: {incoming.Version} (the box has {current.Config.Version})");
         if (!older)
             Console.Error.WriteLine("not updated; pass --older to put the older version in all the same");
         return Task.FromResult(older);
     });
+    var updated = result.Box;
     Console.WriteLine($"updated {updated.Config.Name} {box.Config.Version} -> {updated.Config.Version} in {updated.Paths.Root}");
     Console.WriteLine($"entry: {updated.Config.Entry}  args: {string.Join(' ', updated.Config.LaunchArguments)}");
     foreach (var issue in updated.Config.Issues)
         Console.WriteLine($"issue: {issue.Code} ({issue.Severity}) {issue.Detail}");
+    Console.WriteLine(result.BackupSkipped is { } skipped
+        ? $"no backup of {box.Config.Version} kept: {skipped}"
+        : $"backup: {box.Config.Version} as it was; `go-back` returns to it");
+    return 0;
+}
+
+async Task<int> GoBack(string key)
+{
+    var box = Find(key);
+    if (BoxStore.ReadBackup(box.Paths) is not { } backup)
+    {
+        Console.Error.WriteLine($"{box.Config.Name} has no backup to go back to");
+        return 2;
+    }
+    var back = await host.Manager.GoBackAsync(box);
+    Console.WriteLine($"went back: {back.Config.Name} {box.Config.Version} -> {back.Config.Version} as of {backup.MadeAt.ToLocalTime():yyyy-MM-dd HH:mm}");
+    Console.WriteLine($"backup: {box.Config.Version} as it was; `go-back` returns to it");
+    return 0;
+}
+
+async Task<int> DeleteBackup(string key)
+{
+    var box = Find(key);
+    if (BoxStore.ReadBackup(box.Paths) is not { } backup)
+    {
+        Console.WriteLine($"{box.Config.Name} has no backup");
+        return 0;
+    }
+    await host.Manager.DeleteBackupAsync(box);
+    Console.WriteLine($"deleted the backup of {box.Config.Name} {backup.Config.Version} ({backup.Bytes / (1024 * 1024)} MB)");
     return 0;
 }
 

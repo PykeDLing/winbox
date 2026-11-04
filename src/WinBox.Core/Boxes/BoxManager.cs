@@ -19,6 +19,9 @@ public sealed record ImportedBox(LoadedBox Box, Exception? RegistrationError)
 {
     /// <summary>The installer updated <see cref="Box"/>, which was in the library already, instead of making a new box.</summary>
     public bool Updated { get; init; }
+
+    /// <summary>Why an update kept no backup of the box as it was (see <see cref="BoxBackup"/>); null when it did.</summary>
+    public BackupSkip? BackupSkipped { get; init; }
 }
 
 /// <summary>
@@ -103,7 +106,7 @@ public sealed class BoxManager(
         {
             var same = store.Load().OfType<LoadedBox>().Where(b => BoxUpdate.IsSameApp(b.Config, prepared.Config)).ToList();
             if (same.Count > 0 && await chooseUpdate(same, prepared.Config, cancellationToken).ConfigureAwait(false) is { } target)
-                return new ImportedBox(await ReplaceAppAsync(target, prepared, quitFirst: true, progress, cancellationToken).ConfigureAwait(false), null) { Updated = true };
+                return await ReplaceAppAsync(target, prepared, quitFirst: true, progress, cancellationToken).ConfigureAwait(false);
         }
         var box = prepared.Commit();
         if (!register)
@@ -131,7 +134,7 @@ public sealed class BoxManager(
     /// Asked when the installer brings an older version than the box has. Without it, such an installer is refused
     /// (<see cref="ImportFailure.OlderVersion"/>).
     /// </param>
-    public async Task<LoadedBox> UpdateAsync(
+    public async Task<ImportedBox> UpdateAsync(
         LoadedBox box,
         string file,
         IProgress<ImportProgress>? progress = null,
@@ -153,7 +156,8 @@ public sealed class BoxManager(
         return await ReplaceAppAsync(box, prepared, quitFirst: false, progress, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<LoadedBox> ReplaceAppAsync(LoadedBox box, PreparedImport prepared, bool quitFirst, IProgress<ImportProgress>? progress, CancellationToken cancellationToken)
+    /// <summary>Puts the prepared app in the box's place (<see cref="BoxStore.ReplaceApp"/>), keeping the box as it was to go back to.</summary>
+    private async Task<ImportedBox> ReplaceAppAsync(LoadedBox box, PreparedImport prepared, bool quitFirst, IProgress<ImportProgress>? progress, CancellationToken cancellationToken)
     {
         progress?.Report(new ImportProgress(ImportStage.Updating));
         using (await BoxLock.AcquireAsync(paths, box.Config.Id, _lockWait, cancellationToken).ConfigureAwait(false))
@@ -167,7 +171,38 @@ public sealed class BoxManager(
             // update a crash cut short may have changed it.
             BoxStore.FinishInterruptedUpdate(box.Paths);
             var current = store.Reload(box.Paths) ?? throw new InvalidOperationException($"Box {box.Config.Id:N} is gone.");
-            return store.ReplaceApp(current, prepared, BoxUpdate.Apply(current.Config, prepared.Config, DateTimeOffset.Now));
+            var (updated, skipped) = store.ReplaceApp(current, prepared, BoxUpdate.Apply(current.Config, prepared.Config, DateTimeOffset.Now),
+                progress, cancellationToken);
+            return new ImportedBox(updated, null) { Updated = true, BackupSkipped = skipped };
+        }
+    }
+
+    /// <summary>
+    /// Swaps the box with its backup (<see cref="BoxStore.GoBack"/>): the app and data it had before its last update
+    /// come back, and what it has now becomes the backup. A running box is quit first when
+    /// <paramref name="quitFirst"/>, and refused otherwise.
+    /// </summary>
+    public async Task<LoadedBox> GoBackAsync(LoadedBox box, bool quitFirst = false, CancellationToken cancellationToken = default)
+    {
+        using (await BoxLock.AcquireAsync(paths, box.Config.Id, _lockWait, cancellationToken).ConfigureAwait(false))
+        {
+            if (quitFirst)
+                await QuitLockedAsync(box, cancellationToken).ConfigureAwait(false);
+            if (runner.IsRunning(box))
+                throw new BoxBusyException(box.Config.Id, BoxBusyReason.Running);
+            BoxStore.FinishInterruptedUpdate(box.Paths);
+            var current = store.Reload(box.Paths) ?? throw new InvalidOperationException($"Box {box.Config.Id:N} is gone.");
+            return store.GoBack(current, DateTimeOffset.Now);
+        }
+    }
+
+    /// <summary>Deletes the box's backup, giving its disk space back. The box itself is left as it is, and may run meanwhile.</summary>
+    public async Task DeleteBackupAsync(LoadedBox box, CancellationToken cancellationToken = default)
+    {
+        using (await BoxLock.AcquireAsync(paths, box.Config.Id, _lockWait, cancellationToken).ConfigureAwait(false))
+        {
+            BoxStore.FinishInterruptedUpdate(box.Paths);
+            BoxStore.DeleteBackup(box.Paths);
         }
     }
 

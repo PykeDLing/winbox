@@ -37,7 +37,7 @@ public sealed class StateFolder(string root, Func<string, string, bool>? link = 
     public static IReadOnlyList<string> RebuiltCaches { get; } =
         ["Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache", "GraphiteDawnCache", "GrShaderCache", "ShaderCache"];
 
-    private static bool IsRebuiltCache(DirectoryInfo directory) =>
+    internal static bool IsRebuiltCache(DirectoryInfo directory) =>
         RebuiltCaches.Contains(directory.Name, StringComparer.OrdinalIgnoreCase) ||
         (directory.Name.Equals("Cache", StringComparison.OrdinalIgnoreCase) && Directory.Exists(Path.Combine(directory.FullName, "Cache_Data")));
 

@@ -11,6 +11,7 @@ namespace WinBox.Core.IO;
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(BoxConfig))]
+[JsonSerializable(typeof(BoxBackup))]
 [JsonSerializable(typeof(BoxLaunchRequest))]
 [JsonSerializable(typeof(BoxRunRecord))]
 [JsonSerializable(typeof(ShimResult))]

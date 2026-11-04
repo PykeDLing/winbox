@@ -11,12 +11,15 @@ internal sealed class TestBox : IDisposable
     {
         Root = root ?? Path.Combine(Path.GetTempPath(), "winbox-tests", Guid.NewGuid().ToString("N"));
         Paths = new AppPaths(Root);
-        Store = new BoxStore(Paths);
+        Store = new BoxStore(Paths, freeSpace: dir => FreeSpace(dir));
     }
 
     public string Root { get; }
     public AppPaths Paths { get; }
     public BoxStore Store { get; }
+
+    /// <summary>What the store takes for the free space on a folder's drive: plenty, unless a test says otherwise.</summary>
+    public Func<string, long> FreeSpace { get; set; } = _ => 1L << 50;
 
     public static BoxConfig Config(Guid? id = null, string entry = "app.exe", BoxPackage? package = null) => new()
     {

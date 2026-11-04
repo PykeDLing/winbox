@@ -20,7 +20,7 @@ public sealed class WinBoxHost : IDisposable
     public WinBoxHost(AppPaths? paths = null)
     {
         Paths = paths ?? AppPaths.Default();
-        Store = new BoxStore(Paths);
+        Store = new BoxStore(Paths, link: HardLink.TryCreate);
         Sandbox = new MxcSandboxRunner();
         Planner = new LaunchPlanner(
             WindowsHostAreas.Current,

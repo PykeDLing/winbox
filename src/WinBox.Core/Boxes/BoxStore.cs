@@ -34,16 +34,31 @@ public enum UpdateRecovery
 
     /// <summary>Only the replaced app was left over, and it was deleted (or still waits to be).</summary>
     CleanedUp,
+
+    /// <summary>Going back to the backup had begun: the swap was finished, and box.json describes the app it brought back.</summary>
+    WentBack,
 }
 
 /// <summary>Owns the Boxes directory: listing, importing through a staging directory, and deleting.</summary>
 public sealed class BoxStore
 {
-    private readonly AppPaths _paths;
+    /// <summary>The room a backup's copy of a box's data must leave on its drive; below it, an update keeps no backup.</summary>
+    public const long BackupHeadroom = 1L << 30;
 
-    public BoxStore(AppPaths paths)
+    private readonly AppPaths _paths;
+    private readonly Func<string, long> _freeSpace;
+    private readonly Func<string, string, bool>? _link;
+
+    /// <param name="freeSpace">The bytes free on the drive of the folder it is given; what the drive says by default.</param>
+    /// <param name="link">
+    /// Makes its first argument a hard link to the existing file named by its second, false if it cannot (as for
+    /// <see cref="Sandbox.StateFolder"/>). Without it, backups copy what they could have linked.
+    /// </param>
+    public BoxStore(AppPaths paths, Func<string, long>? freeSpace = null, Func<string, string, bool>? link = null)
     {
         _paths = paths;
+        _freeSpace = freeSpace ?? (dir => new DriveInfo(Path.GetPathRoot(Path.GetFullPath(dir))!).AvailableFreeSpace);
+        _link = link;
         _paths.EnsureCreated();
     }
 
@@ -89,16 +104,24 @@ public sealed class BoxStore
 
     /// <summary>
     /// Puts <paramref name="update"/>'s app in the box's place and <paramref name="config"/> in its box.json, leaving
-    /// the rest of the box as it is. The new app comes in as App.new, App goes to App.old, App.new becomes App; the new
-    /// box.json waits in .unfinished until then, so <see cref="FinishInterruptedUpdate"/> can tell how far a crash got
-    /// and either finish the update or put the old app back. Callers hold the box's lock and make sure it does not run.
+    /// the rest of the box as it is, and keeps the box as it was in Backup\ to go back to (see <see cref="BoxBackup"/>).
+    /// The backup is made in Backup.new first, all but the app (see <see cref="MakeBackup"/>). Then the new app comes
+    /// in as App.new, App goes to App.old, App.new becomes App; the new box.json waits in .unfinished until then, so
+    /// <see cref="FinishInterruptedUpdate"/> can tell how far a crash got and either finish the update or put the old
+    /// app back. Finishing moves App.old into Backup.new and puts Backup.new in place of the backup before. Callers
+    /// hold the box's lock and make sure it does not run.
     /// </summary>
-    public LoadedBox ReplaceApp(LoadedBox box, PreparedImport update, BoxConfig config)
+    /// <returns>The box with its new app, and why no backup was kept (null when one was).</returns>
+    public (LoadedBox Box, BackupSkip? BackupSkipped) ReplaceApp(LoadedBox box, PreparedImport update, BoxConfig config,
+        IProgress<ImportProgress>? progress = null, CancellationToken cancellationToken = default)
     {
         var paths = box.Paths;
         FinishInterruptedUpdate(paths);
         if (Directory.Exists(paths.AppPrevious))
             throw new IOException($"The app an earlier update replaced is still in use: {paths.AppPrevious}");
+        progress?.Report(new ImportProgress(ImportStage.BackingUp));
+        var skipped = MakeBackup(box, config.UpdatedAt ?? DateTimeOffset.Now, cancellationToken);
+        progress?.Report(new ImportProgress(ImportStage.Updating));
         Retry(() => Directory.Move(update.Paths.App, paths.AppStaging));
         JsonFile.Write(paths.UnfinishedMarker, config, WinBoxJson.Files.BoxConfig);
         try
@@ -114,16 +137,65 @@ public sealed class BoxStore
         }
         FinishInterruptedUpdate(paths);
         ReplaceSource(paths.Source, update.Paths.Source);
-        return new LoadedBox(paths, config);
+        return (new LoadedBox(paths, config), skipped);
+    }
+
+    /// <summary>
+    /// Makes Backup.new of the box as it is: a copy of its data, its saved state and its installer, and its box.json
+    /// then, written last to say the rest is complete. Its app joins it once the update has swapped the app out. The
+    /// backup before goes first when the drive has no room for both. When there is no room even so, or the copy
+    /// fails, no backup is kept at all: the one before would no longer be the box as it was before this update.
+    /// </summary>
+    private BackupSkip? MakeBackup(LoadedBox box, DateTimeOffset madeAt, CancellationToken cancellationToken)
+    {
+        var paths = box.Paths;
+        TryDeleteTree(paths.BackupStaging);
+        var data = BackupFiles.Measure(paths.Data);
+        if (_freeSpace(paths.Root) - data < BackupHeadroom)
+        {
+            TryDeleteBackup(paths);
+            if (_freeSpace(paths.Root) - data < BackupHeadroom)
+                return BackupSkip.NoSpace;
+        }
+        try
+        {
+            BackupFiles.Copy(paths.Data, Path.Combine(paths.BackupStaging, "Data"), link: null, cancellationToken);
+            // Saved state and installers are never written to in place, so links to them are as good as copies.
+            foreach (var item in BoxPaths.BackedUpItems.Where(i => i is not ("App" or "Data")))
+                BackupFiles.Copy(Path.Combine(paths.Root, item), Path.Combine(paths.BackupStaging, item), _link, cancellationToken);
+            var backup = new BoxBackup { Config = box.Config, MadeAt = madeAt, Bytes = data + BackupFiles.Measure(paths.App) };
+            JsonFile.Write(BackupFile(paths.BackupStaging), backup, WinBoxJson.Files.BoxBackup);
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            TryDeleteTree(paths.BackupStaging);
+            throw;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            TryDeleteTree(paths.BackupStaging);
+            TryDeleteBackup(paths);
+            return BackupSkip.Failed;
+        }
     }
 
     /// <summary>
     /// Settles an update a crash cut short, by where it got to: while App.new is there the swap never finished and the
-    /// app as it was comes back; once App.new has become App, box.json is brought in line with it. What is left of the
-    /// replaced app is deleted, or left for the next time while something holds it.
+    /// app as it was comes back; once App.new has become App, box.json is brought in line with it. The replaced app
+    /// joins the backup the update made, which then takes the place of the backup before; without one it is deleted,
+    /// or left for the next time while something holds it. Going back to the backup is always finished
+    /// (<see cref="GoBack"/>).
     /// </summary>
     public static UpdateRecovery FinishInterruptedUpdate(BoxPaths paths)
     {
+        if (File.Exists(paths.GoingBackMarker))
+        {
+            FinishGoingBack(paths);
+            return UpdateRecovery.WentBack;
+        }
+        // Made just before the marker: nothing has moved into it yet.
+        TryDeleteTree(paths.BackupSwap);
         if (Directory.Exists(paths.AppStaging))
         {
             if (!Directory.Exists(paths.App) && Directory.Exists(paths.AppPrevious))
@@ -131,6 +203,8 @@ public sealed class BoxStore
             DeleteTree(paths.AppStaging);
             File.Delete(paths.UnfinishedMarker);
             TryDeleteTree(paths.AppPrevious);
+            // The backup of an update that did not happen.
+            TryDeleteTree(paths.BackupStaging);
             return UpdateRecovery.RolledBack;
         }
         var recovery = UpdateRecovery.None;
@@ -143,16 +217,33 @@ public sealed class BoxStore
             }
             File.Delete(paths.UnfinishedMarker);
         }
+        var staged = Path.Combine(paths.BackupStaging, "App");
         if (Directory.Exists(paths.AppPrevious))
         {
             if (!Directory.Exists(paths.App))
             {
                 Directory.Move(paths.AppPrevious, paths.App);
+                TryDeleteTree(paths.BackupStaging);
                 return UpdateRecovery.RolledBack;
             }
-            TryDeleteTree(paths.AppPrevious);
+            if (File.Exists(BackupFile(paths.BackupStaging)) && !Directory.Exists(staged))
+                TryMove(paths.AppPrevious, staged);
+            else
+                TryDeleteTree(paths.AppPrevious);
             if (recovery == UpdateRecovery.None)
                 recovery = UpdateRecovery.CleanedUp;
+        }
+        // The replaced app may still be on its way into the backup: then the backup waits for it.
+        if (Directory.Exists(paths.BackupStaging) && !Directory.Exists(paths.AppPrevious))
+        {
+            if (File.Exists(BackupFile(paths.BackupStaging)) && Directory.Exists(staged))
+            {
+                // Left for the next time while the backup before is held.
+                if (TryDeleteBackup(paths))
+                    TryMove(paths.BackupStaging, paths.Backup);
+            }
+            else
+                TryDeleteTree(paths.BackupStaging);
         }
         return recovery;
     }
@@ -161,10 +252,111 @@ public sealed class BoxStore
     public IReadOnlyList<(Guid Id, BoxPaths Paths)> InterruptedUpdates() =>
         [.. Directory.EnumerateDirectories(_paths.Boxes, "*" + BoxPaths.Extension)
             .Select(dir => (Dir: dir, Paths: new BoxPaths(dir)))
-            .Where(b => Directory.Exists(b.Paths.AppStaging) || Directory.Exists(b.Paths.AppPrevious) || File.Exists(b.Paths.UnfinishedMarker))
+            .Where(b => Directory.Exists(b.Paths.AppStaging) || Directory.Exists(b.Paths.AppPrevious) || File.Exists(b.Paths.UnfinishedMarker) ||
+                Directory.Exists(b.Paths.BackupStaging) || Directory.Exists(b.Paths.BackupSwap) || File.Exists(b.Paths.GoingBackMarker))
             .Select(b => (Ok: Guid.TryParse(Path.GetFileNameWithoutExtension(b.Dir), out var id), Id: id, b.Paths))
             .Where(b => b.Ok)
             .Select(b => (b.Id, b.Paths))];
+
+    /// <summary>
+    /// Swaps the box with its backup (<see cref="BoxBackup"/>): the backup's app, data, saved state and installer come
+    /// back, and the box's go into the backup, so going back once more returns to where the box was. box.json takes
+    /// what describes the app from the backup's and keeps what describes the box (<see cref="BoxUpdate.Apply"/>). It
+    /// waits in .going-back while the parts move one by one through Backup.swap, so <see cref="FinishInterruptedUpdate"/>
+    /// can finish a swap a crash cut short. Only renames: nothing is copied. Callers hold the box's lock and make sure
+    /// it does not run.
+    /// </summary>
+    public LoadedBox GoBack(LoadedBox box, DateTimeOffset now)
+    {
+        var paths = box.Paths;
+        FinishInterruptedUpdate(paths);
+        var backup = ReadBackup(paths) ?? throw new InvalidOperationException($"Box {box.Config.Id:N} has no backup to go back to.");
+        // Every part is in two of the three places throughout, which is how a swap cut short is told apart.
+        foreach (var item in BoxPaths.BackedUpItems)
+            Directory.CreateDirectory(Path.Combine(paths.Root, item));
+        var config = BoxUpdate.Apply(box.Config, backup.Config, now);
+        var kept = new BoxBackup { Config = box.Config, MadeAt = now, Bytes = BackupFiles.Measure(paths.Data) + BackupFiles.Measure(paths.App) };
+        Directory.CreateDirectory(paths.BackupSwap);
+        JsonFile.Write(BackupFile(paths.BackupSwap), kept, WinBoxJson.Files.BoxBackup);
+        JsonFile.Write(paths.GoingBackMarker, config, WinBoxJson.Files.BoxConfig);
+        FinishGoingBack(paths);
+        return new LoadedBox(paths, config);
+    }
+
+    /// <summary>
+    /// Moves each part of the box into Backup.swap and the backup's in its place, picking up where a crash left off,
+    /// then writes box.json and makes Backup.swap the backup. Without Backup.swap, that last step was done already.
+    /// </summary>
+    private static void FinishGoingBack(BoxPaths paths)
+    {
+        if (Directory.Exists(paths.BackupSwap))
+        {
+            foreach (var item in BoxPaths.BackedUpItems)
+            {
+                var (box, backup, swap) = (Path.Combine(paths.Root, item), Path.Combine(paths.Backup, item), Path.Combine(paths.BackupSwap, item));
+                if (Directory.Exists(box) && Directory.Exists(backup))
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(swap)!);
+                    Retry(() => Directory.Move(box, swap));
+                }
+                if (!Directory.Exists(box) && Directory.Exists(backup))
+                    Retry(() => Directory.Move(backup, box));
+                if (!Directory.Exists(box) || !Directory.Exists(swap))
+                    throw new IOException($"Going back left {item} of {paths.Root} neither in the box nor in its backup.");
+            }
+        }
+        JsonFile.Write(paths.ConfigFile, JsonFile.Read(paths.GoingBackMarker, WinBoxJson.Files.BoxConfig), WinBoxJson.Files.BoxConfig);
+        if (Directory.Exists(paths.BackupSwap))
+        {
+            // All that is left of the backup is its old backup.json and empty folders.
+            DeleteBackup(paths);
+            Retry(() => Directory.Move(paths.BackupSwap, paths.Backup));
+        }
+        File.Delete(paths.GoingBackMarker);
+    }
+
+    /// <summary>The box's backup, or null when it has none that is whole.</summary>
+    public static BoxBackup? ReadBackup(BoxPaths paths)
+    {
+        var file = BackupFile(paths.Backup);
+        if (!File.Exists(file) || BoxPaths.BackedUpItems.Any(item => !Directory.Exists(Path.Combine(paths.Backup, item))))
+            return null;
+        try
+        {
+            return JsonFile.Read(file, WinBoxJson.Files.BoxBackup);
+        }
+        catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Deletes the box's backup. Its backup.json goes first, so a delete cut short (a file held) never leaves something
+    /// that looks like a whole backup. Callers hold the box's lock.
+    /// </summary>
+    public static void DeleteBackup(BoxPaths paths)
+    {
+        if (!Directory.Exists(paths.Backup))
+            return;
+        File.Delete(BackupFile(paths.Backup));
+        DeleteTree(paths.Backup);
+    }
+
+    private static bool TryDeleteBackup(BoxPaths paths)
+    {
+        try
+        {
+            DeleteBackup(paths);
+            return true;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static string BackupFile(string backup) => Path.Combine(backup, "backup.json");
 
     /// <summary>The installer the box was last made or updated from, in place of the one before.</summary>
     private static void ReplaceSource(string source, string updated)
@@ -193,6 +385,18 @@ public sealed class BoxStore
             {
                 Thread.Sleep(300);
             }
+        }
+    }
+
+    private static void TryMove(string from, string to)
+    {
+        try
+        {
+            Retry(() => Directory.Move(from, to));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // Still held; tried again the next time an update is settled.
         }
     }
 

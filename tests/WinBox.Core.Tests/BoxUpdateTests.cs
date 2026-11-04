@@ -159,6 +159,9 @@ public sealed class BoxUpdateTests
         Assert.IsFalse(Directory.Exists(box.Paths.AppStaging), "App.new left over");
         Assert.IsFalse(Directory.Exists(box.Paths.AppPrevious), "App.old left over");
         Assert.IsFalse(File.Exists(box.Paths.UnfinishedMarker), ".unfinished left over");
+        Assert.IsFalse(Directory.Exists(box.Paths.BackupStaging), "Backup.new left over");
+        Assert.IsFalse(Directory.Exists(box.Paths.BackupSwap), "Backup.swap left over");
+        Assert.IsFalse(File.Exists(box.Paths.GoingBackMarker), ".going-back left over");
         Assert.AreEqual(0, Directory.GetDirectories(_t.Paths.Boxes, "*" + BoxPaths.PartialExtension).Length, "staging left over");
     }
 
@@ -286,11 +289,11 @@ public sealed class BoxUpdateTests
         var box = await ImportedTool("2.0.0");
         (string? Has, string? Brings)? asked = null;
 
-        var updated = await Manager().UpdateAsync(box, Installer("1.0.0"), confirmDowngrade: (current, incoming, _) =>
+        var updated = (await Manager().UpdateAsync(box, Installer("1.0.0"), confirmDowngrade: (current, incoming, _) =>
         {
             asked = (current.Config.Version, incoming.Version);
             return Task.FromResult(true);
-        });
+        })).Box;
 
         Assert.AreEqual(("2.0.0", "1.0.0"), asked);
         Assert.AreEqual("1.0.0", updated.Config.Version);
@@ -306,7 +309,7 @@ public sealed class BoxUpdateTests
     {
         var box = await ImportedTool("1.0.0");
 
-        var updated = await Manager().UpdateAsync(box, Installer(version), confirmDowngrade: (_, _, _) => throw new AssertFailedException("asked"));
+        var updated = (await Manager().UpdateAsync(box, Installer(version), confirmDowngrade: (_, _, _) => throw new AssertFailedException("asked"))).Box;
 
         Assert.AreEqual(version, VersionIn(updated));
     }
@@ -337,7 +340,7 @@ public sealed class BoxUpdateTests
         var unpack = _unpack;
         _unpack = app => unpack(Directory.CreateDirectory(Path.Combine(app, "app-2.0.0")).FullName);
 
-        var updated = await Manager().UpdateAsync(box, installer);
+        var updated = (await Manager().UpdateAsync(box, installer)).Box;
 
         Assert.AreEqual(@"app-2.0.0\Tool.exe", updated.Config.Entry);
         Assert.IsTrue(File.Exists(Path.Combine(updated.Paths.App, updated.Config.Entry)));
@@ -454,6 +457,291 @@ public sealed class BoxUpdateTests
         await run;
 
         Assert.AreEqual("2.0.0", _runner.StartedWith.Single().Config.Version);
+        AssertNothingLeftOver(box);
+    }
+
+    // Backups: the box as it was before an update, and going back to it.
+
+    private static string Settings(LoadedBox box) => File.ReadAllText(Path.Combine(box.Paths.Roaming, "Tool", "settings.json"));
+
+    private static void WriteSettings(LoadedBox box, string json) => File.WriteAllText(Path.Combine(box.Paths.Roaming, "Tool", "settings.json"), json);
+
+    private static string VersionInBackup(LoadedBox box) => File.ReadAllText(Path.Combine(box.Paths.Backup, "App", "version.txt"));
+
+    private async Task<LoadedBox> UpdatedTool(string from, string to)
+    {
+        var box = await ImportedTool(from);
+        var updated = await Manager().UpdateAsync(box, Installer(to));
+        Assert.IsNull(updated.BackupSkipped);
+        return updated.Box;
+    }
+
+    [TestMethod]
+    public async Task AnUpdateKeepsTheBoxAsItWasToGoBackTo()
+    {
+        var box = await ImportedTool("1.0.0");
+
+        var updated = await Manager().UpdateAsync(box, Installer("2.0.0"));
+
+        Assert.IsNull(updated.BackupSkipped);
+        var backup = BoxStore.ReadBackup(box.Paths)!;
+        Assert.AreEqual("1.0.0", backup.Config.Version);
+        Assert.AreEqual(updated.Box.Config.UpdatedAt, backup.MadeAt);
+        Assert.IsTrue(backup.Bytes > 0);
+        Assert.AreEqual("1.0.0", VersionInBackup(box));
+        Assert.AreEqual("{\"signedIn\":true}", File.ReadAllText(Path.Combine(box.Paths.Backup, "Data", "Profile", "AppData", "Roaming", "Tool", "settings.json")));
+        Assert.AreEqual("state", File.ReadAllText(Path.Combine(box.Paths.Backup, "State", "LocalAppData", "cache.db")));
+        CollectionAssert.AreEqual(new[] { "Tool_setup_1.0.0.exe" }, Directory.GetFiles(Path.Combine(box.Paths.Backup, "Source")).Select(Path.GetFileName).ToArray());
+        Assert.AreEqual("2.0.0", VersionIn(updated.Box));
+        AssertDataKept(updated.Box);
+        AssertNothingLeftOver(updated.Box);
+    }
+
+    [TestMethod]
+    public async Task GoingBackSwapsTheBoxWithItsBackup()
+    {
+        var updated = await UpdatedTool("1.0.0", "2.0.0");
+        WriteSettings(updated, "{\"after\":true}");
+        _t.Store.Save(updated with { Config = updated.Config with { BlockNetwork = true } });
+
+        var back = await Manager().GoBackAsync(_t.Store.Reload(updated.Paths)!);
+
+        Assert.AreEqual("1.0.0", back.Config.Version);
+        Assert.AreEqual("1.0.0", _t.Store.Reload(back.Paths)!.Config.Version);
+        Assert.AreEqual("1.0.0", VersionIn(back));
+        Assert.AreEqual("{\"signedIn\":true}", Settings(back));
+        Assert.AreEqual(true, back.Config.BlockNetwork);
+        CollectionAssert.AreEqual(new[] { "Tool_setup_1.0.0.exe" }, Directory.GetFiles(back.Paths.Source).Select(Path.GetFileName).ToArray());
+        // What the box had becomes the backup, so nothing is lost: going back once more returns to it.
+        Assert.AreEqual("2.0.0", BoxStore.ReadBackup(back.Paths)!.Config.Version);
+        Assert.AreEqual("2.0.0", VersionInBackup(back));
+        AssertNothingLeftOver(back);
+
+        var again = await Manager().GoBackAsync(back);
+
+        Assert.AreEqual("2.0.0", again.Config.Version);
+        Assert.AreEqual("2.0.0", VersionIn(again));
+        Assert.AreEqual("{\"after\":true}", Settings(again));
+        Assert.AreEqual("1.0.0", BoxStore.ReadBackup(again.Paths)!.Config.Version);
+        AssertNothingLeftOver(again);
+    }
+
+    [TestMethod]
+    public async Task ABackupLeavesOutLinksAndRebuiltCaches()
+    {
+        var box = await ImportedTool("1.0.0");
+        var outside = Directory.CreateDirectory(Path.Combine(_t.Root, "Documents")).FullName;
+        File.WriteAllText(Path.Combine(outside, "mine.txt"), "the user's");
+        try
+        {
+            Directory.CreateSymbolicLink(Path.Combine(box.Paths.Profile, "Documents"), outside);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            Assert.Inconclusive($"symbolic links need Developer Mode here: {e.Message}");
+        }
+        var cache = Directory.CreateDirectory(Path.Combine(box.Paths.Roaming, "Tool", "GPUCache")).FullName;
+        File.WriteAllText(Path.Combine(cache, "data_0"), "rebuilt");
+
+        var updated = (await Manager().UpdateAsync(box, Installer("2.0.0"))).Box;
+
+        var data = Path.Combine(box.Paths.Backup, "Data", "Profile");
+        Assert.IsFalse(Directory.Exists(Path.Combine(data, "Documents")));
+        Assert.IsFalse(Directory.Exists(Path.Combine(data, "AppData", "Roaming", "Tool", "GPUCache")));
+        Assert.IsTrue(File.Exists(Path.Combine(data, "AppData", "Roaming", "Tool", "settings.json")));
+
+        // The box's own data, links and all, goes into the backup when the box goes back; deleting the backup then
+        // deletes the link, never what it leads to.
+        var back = await Manager().GoBackAsync(updated);
+        Assert.IsNotNull(new DirectoryInfo(Path.Combine(back.Paths.Backup, "Data", "Profile", "Documents")).LinkTarget);
+        await Manager().DeleteBackupAsync(back);
+
+        Assert.IsFalse(Directory.Exists(back.Paths.Backup));
+        Assert.IsNull(BoxStore.ReadBackup(back.Paths));
+        Assert.AreEqual("the user's", File.ReadAllText(Path.Combine(outside, "mine.txt")));
+    }
+
+    [TestMethod]
+    public async Task AnUpdateWithoutRoomForTheDataKeepsNoBackup()
+    {
+        var updated = await UpdatedTool("1.0.0", "2.0.0");
+        _t.FreeSpace = _ => BoxStore.BackupHeadroom;
+
+        var result = await Manager().UpdateAsync(updated, Installer("3.0.0"));
+
+        Assert.AreEqual(BackupSkip.NoSpace, result.BackupSkipped);
+        Assert.AreEqual("3.0.0", VersionIn(result.Box));
+        AssertDataKept(result.Box);
+        // The backup before is gone too: it was no longer the box as it was before this update.
+        Assert.IsFalse(Directory.Exists(updated.Paths.Backup));
+        AssertNothingLeftOver(result.Box);
+    }
+
+    [TestMethod]
+    public async Task TheBackupBeforeMakesRoomForTheNewOne()
+    {
+        var updated = await UpdatedTool("1.0.0", "2.0.0");
+        _t.FreeSpace = _ => Directory.Exists(updated.Paths.Backup) ? 0 : 1L << 50;
+
+        var result = await Manager().UpdateAsync(updated, Installer("3.0.0"));
+
+        Assert.IsNull(result.BackupSkipped);
+        Assert.AreEqual("2.0.0", BoxStore.ReadBackup(updated.Paths)!.Config.Version);
+        Assert.AreEqual("2.0.0", VersionInBackup(updated));
+        AssertNothingLeftOver(result.Box);
+    }
+
+    [TestMethod]
+    public async Task GoingBackNeedsABackupAndABoxThatDoesNotRun()
+    {
+        var box = await ImportedTool("1.0.0");
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => Manager().GoBackAsync(box));
+
+        var updated = (await Manager().UpdateAsync(box, Installer("2.0.0"))).Box;
+        _runner.Running.Add(updated.Config.Id);
+        await Assert.ThrowsExactlyAsync<BoxBusyException>(() => Manager().GoBackAsync(updated));
+
+        Assert.AreEqual("2.0.0", VersionIn(updated));
+        Assert.AreEqual("1.0.0", VersionInBackup(updated));
+    }
+
+    [TestMethod]
+    public async Task ARunningBoxIsQuitBeforeGoingBackWhenAsked()
+    {
+        var updated = await UpdatedTool("1.0.0", "2.0.0");
+        _runner.Running.Add(updated.Config.Id);
+        _runner.StopsWhenAsked = true;
+
+        var back = await Manager(stopWait: TimeSpan.FromSeconds(5)).GoBackAsync(updated, quitFirst: true);
+
+        CollectionAssert.Contains(_runner.StopRequests, updated.Config.Id);
+        Assert.AreEqual("1.0.0", VersionIn(back));
+    }
+
+    // A crash while going back, and what the next start makes of it.
+
+    private async Task<LoadedBox> StartedGoingBack()
+    {
+        var updated = await UpdatedTool("1.0.0", "2.0.0");
+        var paths = updated.Paths;
+        Directory.CreateDirectory(paths.LocalAppDataState);
+        Directory.CreateDirectory(paths.BackupSwap);
+        JsonFile.Write(Path.Combine(paths.BackupSwap, "backup.json"), new BoxBackup { Config = updated.Config, MadeAt = DateTimeOffset.Now },
+            WinBoxJson.Files.BoxBackup);
+        var backup = BoxStore.ReadBackup(paths)!;
+        JsonFile.Write(paths.GoingBackMarker, BoxUpdate.Apply(updated.Config, backup.Config, DateTimeOffset.Now), WinBoxJson.Files.BoxConfig);
+        return updated;
+    }
+
+    private void AssertWentBack(LoadedBox box)
+    {
+        Assert.AreEqual(UpdateRecovery.WentBack, BoxStore.FinishInterruptedUpdate(box.Paths));
+        Assert.AreEqual("1.0.0", VersionIn(box));
+        Assert.AreEqual("1.0.0", _t.Store.Reload(box.Paths)!.Config.Version);
+        Assert.AreEqual("{\"signedIn\":true}", Settings(box));
+        Assert.AreEqual("2.0.0", BoxStore.ReadBackup(box.Paths)!.Config.Version);
+        Assert.AreEqual("2.0.0", VersionInBackup(box));
+        AssertNothingLeftOver(box);
+    }
+
+    [TestMethod]
+    public async Task ACrashHalfwayThroughAPartFinishesGoingBack()
+    {
+        var box = await StartedGoingBack();
+        WriteSettings(box, "{\"after\":true}");
+        Directory.Move(box.Paths.App, Path.Combine(box.Paths.BackupSwap, "App"));
+
+        AssertWentBack(box);
+    }
+
+    [TestMethod]
+    public async Task ACrashAfterSomePartsFinishesGoingBack()
+    {
+        var box = await StartedGoingBack();
+        foreach (var item in new[] { "App", "Data" })
+        {
+            Directory.Move(Path.Combine(box.Paths.Root, item), Path.Combine(box.Paths.BackupSwap, item));
+            Directory.Move(Path.Combine(box.Paths.Backup, item), Path.Combine(box.Paths.Root, item));
+        }
+
+        AssertWentBack(box);
+    }
+
+    [TestMethod]
+    public async Task ACrashAfterEveryPartMovedFinishesGoingBack()
+    {
+        var box = await StartedGoingBack();
+        foreach (var item in BoxPaths.BackedUpItems)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(box.Paths.BackupSwap, item))!);
+            Directory.Move(Path.Combine(box.Paths.Root, item), Path.Combine(box.Paths.BackupSwap, item));
+            Directory.Move(Path.Combine(box.Paths.Backup, item), Path.Combine(box.Paths.Root, item));
+        }
+        BoxStore.DeleteBackup(box.Paths);
+
+        AssertWentBack(box);
+    }
+
+    [TestMethod]
+    public async Task ACrashBeforeGoingBackBeganChangesNothing()
+    {
+        var box = await StartedGoingBack();
+        File.Delete(box.Paths.GoingBackMarker);
+
+        Assert.AreEqual(UpdateRecovery.None, BoxStore.FinishInterruptedUpdate(box.Paths));
+
+        Assert.AreEqual("2.0.0", VersionIn(box));
+        Assert.AreEqual("1.0.0", VersionInBackup(box));
+        AssertNothingLeftOver(box);
+    }
+
+    // A crash during an update that was making a backup.
+
+    private static void StageBackup(LoadedBox box)
+    {
+        var staging = box.Paths.BackupStaging;
+        foreach (var item in BoxPaths.BackedUpItems.Where(i => i != "App"))
+            Directory.CreateDirectory(Path.Combine(staging, item));
+        JsonFile.Write(Path.Combine(staging, "backup.json"), new BoxBackup { Config = box.Config, MadeAt = DateTimeOffset.Now }, WinBoxJson.Files.BoxBackup);
+    }
+
+    [TestMethod]
+    public async Task ACrashBeforeTheSwapDropsTheBackupItWasMaking()
+    {
+        var (box, _) = await Interrupted(staged: true, pending: true, swapped: false);
+        StageBackup(box);
+
+        Assert.AreEqual(UpdateRecovery.RolledBack, BoxStore.FinishInterruptedUpdate(box.Paths));
+
+        Assert.AreEqual("1.0.0", VersionIn(box));
+        Assert.IsNull(BoxStore.ReadBackup(box.Paths));
+        AssertNothingLeftOver(box);
+    }
+
+    [TestMethod]
+    public async Task ACrashAfterTheSwapKeepsTheBackup()
+    {
+        var (box, pending) = await Interrupted(staged: true, pending: true, swapped: true);
+        StageBackup(box);
+
+        Assert.AreEqual(UpdateRecovery.Finished, BoxStore.FinishInterruptedUpdate(box.Paths));
+
+        Assert.AreEqual("2.0.0", VersionIn(box));
+        Assert.AreEqual(pending.Version, _t.Store.Reload(box.Paths)!.Config.Version);
+        Assert.AreEqual("1.0.0", BoxStore.ReadBackup(box.Paths)!.Config.Version);
+        Assert.AreEqual("1.0.0", VersionInBackup(box));
+        AssertNothingLeftOver(box);
+    }
+
+    [TestMethod]
+    public async Task ABackupMadeForAnUpdateThatNeverBeganIsDropped()
+    {
+        var box = await ImportedTool("1.0.0");
+        StageBackup(box);
+
+        BoxStore.FinishInterruptedUpdate(box.Paths);
+
+        Assert.IsNull(BoxStore.ReadBackup(box.Paths));
         AssertNothingLeftOver(box);
     }
 }

@@ -19,8 +19,12 @@ namespace WinBox.Core.Boxes;
 ///   Reports\        private   (run reports, newest 20 kept)
 ///   Host\           private   (the box's MSIX package: manifest, BoxHost, launch.json, run.json)
 ///   App.new\        private   (an update's new app, until it takes App\'s place; see BoxStore.ReplaceApp)
-///   App.old\        private   (the app an update replaced, until it is deleted)
+///   App.old\        private   (the app an update replaced, until it moves into the backup or is deleted)
 ///   .unfinished     private   (an update's new box.json, while App\ is being swapped)
+///   Backup\         private   (the box as it was before its last update, to go back to; see BoxBackup)
+///   Backup.new\     private   (the backup an update is making, until the update is done)
+///   Backup.swap\    private   (the box as it was, while going back swaps it with the backup)
+///   .going-back     private   (box.json once the box has gone back, while the swap runs)
 /// </code>
 /// </remarks>
 public sealed class BoxPaths
@@ -57,6 +61,16 @@ public sealed class BoxPaths
     public string AppStaging => Path.Combine(Root, "App.new");
     public string AppPrevious => Path.Combine(Root, "App.old");
     public string UnfinishedMarker => Path.Combine(Root, ".unfinished");
+    public string Backup => Path.Combine(Root, "Backup");
+    public string BackupStaging => Path.Combine(Root, "Backup.new");
+    public string BackupSwap => Path.Combine(Root, "Backup.swap");
+    public string GoingBackMarker => Path.Combine(Root, ".going-back");
+
+    /// <summary>
+    /// What a backup holds of the box, relative to the box's root and to the backup's: the parts going back swaps.
+    /// The saved state is only its LocalAppData; State\Control is WinBox's talk with BoxShim, not the app's.
+    /// </summary>
+    public static IReadOnlyList<string> BackedUpItems { get; } = ["App", "Data", Path.Combine("State", "LocalAppData"), "Source"];
 
     /// <summary>Directories the sandboxed app may write to.</summary>
     public IReadOnlyList<string> WritableItems => [Data, Tmp, State];
@@ -65,7 +79,8 @@ public sealed class BoxPaths
     public IReadOnlyList<string> ReadOnlyItems => [App, Shim];
 
     /// <summary>Items the sandboxed app gets no access to at all.</summary>
-    public IReadOnlyList<string> PrivateItems => [ConfigFile, Icon, Source, Reports, Host, AppStaging, AppPrevious, UnfinishedMarker];
+    public IReadOnlyList<string> PrivateItems =>
+        [ConfigFile, Icon, Source, Reports, Host, AppStaging, AppPrevious, UnfinishedMarker, Backup, BackupStaging, BackupSwap, GoingBackMarker];
 
     /// <summary>Directories that must exist for the box to be usable.</summary>
     public IReadOnlyList<string> Skeleton => [App, Shim, Data, Tmp, State, Source, Reports];

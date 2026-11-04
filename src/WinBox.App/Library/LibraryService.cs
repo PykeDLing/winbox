@@ -27,7 +27,8 @@ public enum BoxActivity
 }
 
 /// <param name="IconUri">The box's icon, versioned by when it was written: see <see cref="LibraryService.IconUri"/>.</param>
-public sealed record BoxEntry(LoadedBox Box, BoxActivity Activity, string? IconUri, string? Problem)
+/// <param name="Backup">The box as it was before its last update, to go back to; null when there is none.</param>
+public sealed record BoxEntry(LoadedBox Box, BoxActivity Activity, string? IconUri, string? Problem, BoxBackup? Backup = null)
 {
     public Guid Id => Box.Config.Id;
     public bool CanOpen => Activity == BoxActivity.Idle;
@@ -83,6 +84,7 @@ public enum ImportStep
     Finishing,
     Registering,
     Updating,
+    BackingUp,
 }
 
 /// <param name="Unfinished">
@@ -120,6 +122,7 @@ public sealed class LibraryService : IDisposable
     private readonly HashSet<Guid> _pendingStops = [];
     private readonly Dictionary<Guid, string> _problems = [];
     private readonly Dictionary<Guid, string> _icons = [];
+    private readonly Dictionary<Guid, BoxBackup> _backups = [];
     private readonly List<ImportJob> _imports = [];
     private readonly Dictionary<Guid, CancellationTokenSource> _importCancels = [];
     private readonly Dictionary<Guid, TaskCompletionSource> _importAnswers = [];
@@ -182,7 +185,8 @@ public sealed class LibraryService : IDisposable
                     b,
                     _activity.GetValueOrDefault(b.Config.Id),
                     _icons.GetValueOrDefault(b.Config.Id),
-                    _problems.GetValueOrDefault(b.Config.Id)))
+                    _problems.GetValueOrDefault(b.Config.Id),
+                    _backups.GetValueOrDefault(b.Config.Id)))
                 .ToList();
             var unfinished = boxes.Any(b => b.Activity is BoxActivity.Starting or BoxActivity.Running or BoxActivity.Removing)
                 || _pendingStops.Count > 0 || _importCancels.Count > 0;
@@ -251,10 +255,17 @@ public sealed class LibraryService : IDisposable
     public void Reload()
     {
         var entries = _host.Store.Load();
+        var backups = entries.OfType<LoadedBox>()
+            .Select(b => (b.Config.Id, Backup: BoxStore.ReadBackup(b.Paths)))
+            .Where(b => b.Backup is not null)
+            .ToDictionary(b => b.Id, b => b.Backup!);
         lock (_lock)
         {
             _boxes = entries.OfType<LoadedBox>().ToList();
             _broken = entries.OfType<BrokenBox>().ToList();
+            _backups.Clear();
+            foreach (var (id, backup) in backups)
+                _backups[id] = backup;
             foreach (var box in _boxes)
             {
                 if (File.Exists(box.Paths.Icon))
@@ -495,16 +506,10 @@ public sealed class LibraryService : IDisposable
                     SetActivity(id, _ => BoxActivity.Updating);
                 Update(j => j with { Step = StepOf(p.Stage), Download = p.Download });
             });
-            LoadedBox box;
-            Exception? registrationError = null;
-            var updated = target is not null;
-            if (target is null)
-            {
-                var imported = await _host.Manager.ImportAsync(file, progress, Confirm, chooseUpdate: ChooseUpdate, cancellationToken: cancel.Token);
-                (box, registrationError, updated) = (imported.Box, imported.RegistrationError, imported.Updated);
-            }
-            else
-                box = await _host.Manager.UpdateAsync(target, file, progress, Confirm, ConfirmDowngrade, cancel.Token);
+            var imported = target is null
+                ? await _host.Manager.ImportAsync(file, progress, Confirm, chooseUpdate: ChooseUpdate, cancellationToken: cancel.Token)
+                : await _host.Manager.UpdateAsync(target, file, progress, Confirm, ConfirmDowngrade, cancel.Token);
+            var (box, registrationError, updated) = (imported.Box, imported.RegistrationError, imported.Updated);
             lock (_lock)
             {
                 if (updated)
@@ -520,14 +525,15 @@ public sealed class LibraryService : IDisposable
                 AppLog.Write($"registering the package of {box.Config.Id:N} failed: {registrationError}");
             if (updated)
             {
-                AppLog.Write($"updated {box.Config.Id:N} to {box.Config.Name} {box.Config.Version} from {job.FileName}");
+                AppLog.Write($"updated {box.Config.Id:N} to {box.Config.Name} {box.Config.Version} from {job.FileName}"
+                    + (imported.BackupSkipped is { } skipped ? $"; no backup kept ({skipped})" : $"; {previous} kept as the backup"));
                 SetActivity(box.Config.Id, current => current == BoxActivity.Updating ? BoxActivity.Idle : current);
             }
             Reload();
             await ExtractIconAsync(box);
             // The new app is in the box and the box is free again: the card says so until it is closed.
             if (updated)
-                Update(j => j with { Done = Texts.Updated(box.Config, previous), Updated = box.Config.Id });
+                Update(j => j with { Done = Texts.Updated(box.Config, previous, imported.BackupSkipped), Updated = box.Config.Id });
         }
         catch (OperationCanceledException) when (cancel.IsCancellationRequested)
         {
@@ -587,6 +593,7 @@ public sealed class LibraryService : IDisposable
         ImportStage.CheckingCompatibility => ImportStep.CheckingCompatibility,
         ImportStage.Registering => ImportStep.Registering,
         ImportStage.Updating => ImportStep.Updating,
+        ImportStage.BackingUp => ImportStep.BackingUp,
         _ => ImportStep.Finishing,
     };
 
@@ -800,6 +807,73 @@ public sealed class LibraryService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Swaps the box with its backup (see <see cref="BoxBackup"/>), quitting it first if it runs; the card shows it as
+    /// updating meanwhile. Returns the box as it is now, or null when it is gone.
+    /// </summary>
+    public async Task<LoadedBox?> GoBackAsync(Guid id)
+    {
+        LoadedBox? box;
+        lock (_lock)
+        {
+            box = _boxes.FirstOrDefault(b => b.Config.Id == id);
+            if (box is not null)
+                _followUps++;
+        }
+        if (box is null)
+            return null;
+        SetActivity(id, _ => BoxActivity.Updating);
+        try
+        {
+            var back = await Task.Run(() => _host.Manager.GoBackAsync(box, quitFirst: true));
+            AppLog.Write($"{id:N} went back to {back.Config.Name} {back.Config.Version}; {box.Config.Version} kept as the backup");
+            lock (_lock)
+            {
+                _problems.Remove(id);
+                // "Updated, and the old version is backed up" no longer holds.
+                _imports.RemoveAll(j => j.Updated == id);
+            }
+            SetActivity(id, current => current == BoxActivity.Updating ? BoxActivity.Idle : current);
+            Reload();
+            await ExtractIconAsync(back);
+            return back;
+        }
+        catch (Exception e)
+        {
+            AppLog.Write($"going back in {id:N} failed: {e}");
+            SetActivity(id, current => current != BoxActivity.Updating ? current
+                : _host.Runner.IsRunning(box) ? BoxActivity.Running : BoxActivity.Idle);
+            throw;
+        }
+        finally
+        {
+            lock (_lock)
+                _followUps--;
+            Notify();
+        }
+    }
+
+    /// <summary>Deletes the box's backup, giving its disk space back. The box may run meanwhile.</summary>
+    public async Task DeleteBackupAsync(Guid id)
+    {
+        if (Find(id) is not { } box)
+            return;
+        lock (_lock)
+            _followUps++;
+        try
+        {
+            await Task.Run(() => _host.Manager.DeleteBackupAsync(box));
+            AppLog.Write($"deleted the backup of {id:N}");
+            Reload();
+        }
+        finally
+        {
+            lock (_lock)
+                _followUps--;
+            Notify();
+        }
+    }
+
     private async Task<RemoveResult> RemoveAsync(LoadedBox box)
     {
         var id = box.Config.Id;
@@ -820,6 +894,7 @@ public sealed class LibraryService : IDisposable
                 _activity.Remove(id);
                 _problems.Remove(id);
                 _icons.Remove(id);
+                _backups.Remove(id);
                 // "Updated, and the data is all there" would now speak of a box that is gone.
                 _imports.RemoveAll(j => j.Updated == id);
             }

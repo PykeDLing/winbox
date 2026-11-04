@@ -30,6 +30,7 @@ public static class Texts
         ImportStep.CheckingCompatibility => "检查兼容性",
         ImportStep.Finishing => "收尾",
         ImportStep.Updating => "换上新的程序，登录信息和数据保留",
+        ImportStep.BackingUp => "备份更新前的程序和数据",
         _ => "创建盒子的应用包",
     };
 
@@ -64,11 +65,52 @@ public static class Texts
             + (offer.Count > 1 ? $"这样的盒子有 {offer.Count} 个，{(offer.Older ? "换" : "更新")}的是{Added(offer.Box.Config.CreatedAt)}的那个。" : "");
     }
 
-    /// <summary>What an update did; <paramref name="previous"/> is the version the box had.</summary>
-    public static string Updated(BoxConfig config, string? previous) =>
-        string.IsNullOrWhiteSpace(config.Version) ? $"已更新“{config.Name}”，登录信息和数据都在"
+    /// <summary>What an update did; <paramref name="previous"/> is the version the box had, kept as its backup unless <paramref name="skipped"/>.</summary>
+    public static string Updated(BoxConfig config, string? previous, BackupSkip? skipped) =>
+        (string.IsNullOrWhiteSpace(config.Version) ? $"已更新“{config.Name}”，登录信息和数据都在"
         : BoxUpdate.Compare(previous, config.Version) == VersionChange.Older ? $"已把“{config.Name}”换成旧版本 {config.Version}，登录信息和数据都在"
-        : $"已把“{config.Name}”更新到 {config.Version}，登录信息和数据都在";
+        : $"已把“{config.Name}”更新到 {config.Version}，登录信息和数据都在")
+        + skipped switch
+        {
+            null => $"。原来的{Spaced(previous, "版本")}已备份，可以从卡片的 ⋯ 菜单换回去",
+            BackupSkip.NoSpace => "。磁盘空间不够，这次没有备份原来的版本",
+            _ => "。没能备份原来的版本",
+        };
+
+    /// <summary>A version inside a sentence, spaced off from the Chinese around it; <paramref name="otherwise"/> without one.</summary>
+    private static string Spaced(string? version, string otherwise) => string.IsNullOrWhiteSpace(version) ? otherwise : $" {version} ";
+
+    /// <summary>The card menu's item for going back to <paramref name="backup"/>.</summary>
+    public static string GoBackItem(BoxBackup backup) =>
+        string.IsNullOrWhiteSpace(backup.Config.Version) ? "换回更新前的版本…" : $"换回 {backup.Config.Version}…";
+
+    public static string DeleteBackupItem(BoxBackup backup) => $"删除备份（{Size(backup.Bytes)}）…";
+
+    public static string GoBackTitle(string name, BoxBackup? backup) =>
+        string.IsNullOrWhiteSpace(backup?.Config.Version) ? $"把“{name}”换回更新前的版本？" : $"把“{name}”换回 {backup.Config.Version}？";
+
+    /// <summary>What going back does, for the dialog that asks.</summary>
+    public static string GoBackEffects(BoxConfig current, BoxBackup? backup, bool running) =>
+        (backup is null ? "" : $"会换回 {Moment(backup.MadeAt)} 时的程序和数据。")
+        + $"现在的{Spaced(current.Version, "版本")}和它的数据会留作备份，之后还可以换回来。"
+        + (running ? "\n\n它正在运行，会先请它保存并退出。" : "");
+
+    public static string WentBack(string name, BoxConfig now, string? before) =>
+        (string.IsNullOrWhiteSpace(now.Version) ? $"已把“{name}”换回更新前的版本。" : $"已把“{name}”换回 {now.Version}。")
+        + $"原来的{Spaced(before, "版本")}和它的数据留作备份，⋯ 菜单里可以再换回去。";
+
+    public static string DeleteBackupTitle(string name) => $"删除“{name}”的备份？";
+
+    public static string DeleteBackupEffects(BoxBackup? backup) => backup is null
+        ? "删除后就不能再换回这个版本了。"
+        : $"备份里是 {Moment(backup.MadeAt)} 时的{Spaced(backup.Config.Version, "版本")}和它的数据，占 {Size(backup.Bytes)}。删除后就不能再换回这个版本了。";
+
+    public static string BackupDeleted(string name, BoxBackup? backup) =>
+        backup is null ? $"已删除“{name}”的备份。" : $"已删除“{name}”的备份，腾出了 {Size(backup.Bytes)}。";
+
+    private static string Moment(DateTimeOffset time) => $"{time.ToLocalTime():M月d日 HH:mm}";
+
+    private static string Size(long bytes) => bytes >= 1L << 30 ? $"{bytes / (double)(1L << 30):0.#} GB" : $"{Math.Max(1, bytes >> 20)} MB";
 
     public const string UpdateWhileBusy = "它正在运行。请先退出它，再更新";
 

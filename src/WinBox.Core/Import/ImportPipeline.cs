@@ -16,6 +16,9 @@ public enum ImportStage
 
     /// <summary>The installer's app is taking the place of an existing box's app (see <see cref="Boxes.BoxUpdate"/>).</summary>
     Updating,
+
+    /// <summary>Before its app is replaced, the box as it is is kept to go back to (see <see cref="Boxes.BoxBackup"/>).</summary>
+    BackingUp,
 }
 
 public sealed record ImportProgress(ImportStage Stage, DownloadProgress? Download = null);

@@ -11,7 +11,9 @@ using WinBox.App.Library;
 using WinBox.Core.Sandbox;
 using WinBox.Platform.Sandbox;
 using static Microsoft.UI.Reactor.Factories;
+using BoxBusyException = WinBox.Core.Boxes.BoxBusyException;
 using IssueSeverity = WinBox.Core.Boxes.IssueSeverity;
+using MenuFlyoutItemBase = Microsoft.UI.Reactor.Core.MenuFlyoutItemBase;
 
 namespace WinBox.App.Views;
 
@@ -31,6 +33,11 @@ internal enum ConfirmKind
 
     /// <summary>Change what closing the window does (from the tray menu).</summary>
     CloseSetting,
+
+    /// <summary>Swap a box with its backup: the app and data it had before its last update.</summary>
+    GoBack,
+
+    DeleteBackup,
 }
 
 /// <summary>
@@ -144,6 +151,12 @@ internal sealed class LibraryPage : Component
                     break;
                 case ConfirmKind.CloseSetting:
                     SaveCloseAction(closeChoice);
+                    break;
+                case ConfirmKind.GoBack:
+                    _ = Guarded(() => GoBackAsync(question));
+                    break;
+                case ConfirmKind.DeleteBackup:
+                    _ = Guarded(() => DeleteBackupAsync(question));
                     break;
             }
         }
@@ -324,6 +337,27 @@ internal sealed class LibraryPage : Component
                 setError($"已删除“{question.BoxName}”，但有 {outcome.Leftovers.Count} 处没能清理：{string.Join("；", outcome.Leftovers)}");
         }
 
+        async Task GoBackAsync(Confirmation question)
+        {
+            var before = library.Snapshot().Boxes.FirstOrDefault(b => b.Id == question.BoxId)?.Box.Config.Version;
+            try
+            {
+                if (await library.GoBackAsync(question.BoxId) is { } back)
+                    setNotice(Texts.WentBack(question.BoxName, back.Config, before));
+            }
+            catch (BoxBusyException e)
+            {
+                setError(Texts.Busy(e.Reason));
+            }
+        }
+
+        async Task DeleteBackupAsync(Confirmation question)
+        {
+            var backup = library.Snapshot().Boxes.FirstOrDefault(b => b.Id == question.BoxId)?.Backup;
+            await library.DeleteBackupAsync(question.BoxId);
+            setNotice(Texts.BackupDeleted(question.BoxName, backup));
+        }
+
         // Fire-and-forget work from a click: whatever goes wrong must show up, never vanish.
         async Task Guarded(Func<Task> work)
         {
@@ -375,13 +409,24 @@ internal sealed class LibraryPage : Component
         // An icon button rather than a DropDownButton: its text label and chevron left no room for Show window
         // and Quit on a running box's card. A button's flyout opens above it by default; below, as a
         // DropDownButton's does, it keeps the card's status in view.
+        // The backup the last update kept: going back to it, or deleting it to give its space back.
         Element More(BoxEntry entry) => Button(Glyph(MoreGlyph))
             .WithFlyout(MenuItems(FlyoutPlacementMode.BottomEdgeAlignedLeft,
+            [
                 MenuSubItem("打开授权文件夹", [.. library.HostPlaces.Select(place => MenuItem(place.Label,
                     () => _ = Guarded(() => OpenOutsideAsync(library.OpenFolderOutsideAsync(entry.Id, place.Path), place.Path))))]),
                 MenuItem("在盒外打开文件…", () => _ = Guarded(() => PickOutsideAsync(entry))),
-                MenuItem("用新安装包更新…", () => _ = Guarded(() => PickUpdateAsync(entry)))))
-            .AutomationName($"{entry.Box.Config.Name}的更多操作").ToolTip("更新，或在盒子外打开文件和文件夹");
+                MenuItem("用新安装包更新…", () => _ = Guarded(() => PickUpdateAsync(entry))),
+                .. entry.Backup is { } backup
+                    ? new MenuFlyoutItemBase[]
+                    {
+                        MenuSeparator(),
+                        MenuItem(Texts.GoBackItem(backup), () => Ask(ConfirmKind.GoBack, entry)) with { IsEnabled = entry.CanRemove },
+                        MenuItem(Texts.DeleteBackupItem(backup), () => Ask(ConfirmKind.DeleteBackup, entry)) with { IsEnabled = entry.CanRemove },
+                    }
+                    : [],
+            ]))
+            .AutomationName($"{entry.Box.Config.Name}的更多操作").ToolTip("更新、换回更新前的版本，或在盒子外打开文件和文件夹");
 
         // A newer installer of the box's app; dropping one in offers the same, this is the way the menu shows.
         async Task PickUpdateAsync(BoxEntry entry)
@@ -469,8 +514,14 @@ internal sealed class LibraryPage : Component
             with { RowGap = 16 }).FlexPadding(32, 8, 32, 32);
 
         var asked = confirm ?? lastConfirm;
+        var askedBox = snapshot.Boxes.FirstOrDefault(b => b.Id == asked?.BoxId);
         var dialog = (asked?.Kind switch
         {
+            ConfirmKind.GoBack => ConfirmDialog(
+                Texts.GoBackTitle(asked.BoxName, askedBox?.Backup),
+                askedBox is null ? "" : Texts.GoBackEffects(askedBox.Box.Config, askedBox.Backup, askedBox.Activity == BoxActivity.Running),
+                "换回"),
+            ConfirmKind.DeleteBackup => ConfirmDialog(Texts.DeleteBackupTitle(asked.BoxName), Texts.DeleteBackupEffects(askedBox?.Backup), "删除"),
             ConfirmKind.Remove => ConfirmDialog(
                 $"删除“{asked.BoxName}”（{asked.Added}）？",
                 "将删除这个软件的程序、登录状态和全部数据，以及它的应用包，并清除 Windows 记下的使用痕迹。\n\n你自己的文件（例如下载到“下载”文件夹的文件）不受影响。删除后无法恢复。",
@@ -580,7 +631,7 @@ internal sealed class LibraryPage : Component
                 job.Failed
                     ? Button("关闭", dismiss).AutomationName($"关闭{job.FileName}的提示")
                     // Registering the package or swapping the app cannot be called back halfway; by then the box is all but done.
-                    : Button("取消", cancel).AutomationName($"取消添加{job.FileName}").IsEnabled(job.Step is not (ImportStep.Registering or ImportStep.Updating)))
+                    : Button("取消", cancel).AutomationName($"取消添加{job.FileName}").IsEnabled(job.Step is not (ImportStep.Registering or ImportStep.BackingUp or ImportStep.Updating)))
             with { ColumnGap = 16, AlignItems = FlexAlign.Center }));
     }
 
